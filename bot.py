@@ -88,9 +88,9 @@ async def tldr(interaction: discord.Interaction, hours: int):
         " υπήρχαν σημαντικές αποφάσεις ή links."
     )
 
-    # Λίστα με έγκυρα μοντέλα στο Groq
-    candidate_models = ["llama-3.1-8b-instant", "llama3-70b-8192", "mixtral-8x7b-32768"]
-    
+    # Μόνο τα ενεργά και έγκυρα μοντέλα του Groq
+    candidate_models = ["llama-3.1-8b-instant", "llama-3.3-70b-specdec"]
+
     summary = None
     last_error = None
 
@@ -100,7 +100,10 @@ async def tldr(interaction: discord.Interaction, hours: int):
                 model=model_name,
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Ιστορικό Συνομιλίας:\n{chat_log}"},
+                    {
+                        "role": "user",
+                        "content": f"Ιστορικό Συνομιλίας:\n{chat_log}",
+                    },
                 ],
                 temperature=0.5,
                 max_tokens=1000,
