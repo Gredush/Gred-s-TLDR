@@ -210,6 +210,14 @@ async def fetch_and_generate_tldr(channel: discord.TextChannel, hours: int) -> s
         
     )
 
+    full_chat_payload = (
+        f"--- ΠΡΟΗΓΟΥΜΕΝΟ CONTEXT (ΓΙΑ ΚΑΤΑΝΟΗΣΗ ΥΠΟΒΑΘΡΟΥ) ---\n"
+        f"{context_log if context_log else 'Δεν υπάρχει προηγούμενο context.'}\n\n"
+        f"--- ΝΕΑ ΜΗΝΥΜΑΤΑ ΠΡΟΣ ΣΥΝΟΨΗ (ΤΕΛΕΥΤΑΙΑ/ΕΣ {hours} ΩΡΑ/ΕΣ) ---\n"
+        f"{target_log}"
+    )
+
+    return await generate_summary_with_fallback(system_prompt, full_chat_payload)
     return await generate_summary_with_fallback(system_prompt, chat_log)
 
 
