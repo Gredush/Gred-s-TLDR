@@ -290,14 +290,25 @@ async def tldr(interaction: discord.Interaction, hours: int):
 
     await interaction.response.defer(thinking=True)
 
+    # Συνάρτηση για να ενημερώνουμε το status στο Discord
+    async def update_status(text: str):
+        try:
+            await interaction.edit_original_response(content=text)
+        except Exception:
+            pass
+
     try:
         channel = interaction.channel
         if isinstance(channel, discord.TextChannel):
-            summary = await fetch_and_generate_tldr(channel, hours=hours)
+            summary = await fetch_and_generate_tldr(
+                channel, 
+                hours=hours, 
+                status_callback=update_status
+            )
 
             if not summary:
-                await interaction.followup.send(
-                    f"Δεν βρέθηκαν νέα μηνύματα τις τελευταίες {hours} ώρες."
+                await interaction.edit_original_response(
+                    content=f"Δεν βρέθηκαν νέα μηνύματα τις τελευταίες {hours} ώρες."
                 )
                 return
 
@@ -305,14 +316,17 @@ async def tldr(interaction: discord.Interaction, hours: int):
             header = f"**TL;DR Τελευταίων {hours} Ωρών** 📝\n\n"
             final_msg = fit_to_discord_limit(header, summary)
 
-            await interaction.followup.send(final_msg)
+            # Στέλνουμε το τελικό αποτέλεσμα αντικαθιστώντας το status
+            await interaction.edit_original_response(content=final_msg)
         else:
-            await interaction.followup.send("Αυτή η εντολή υποστηρίζεται μόνο σε κείμενα καναλιών.")
+            await interaction.edit_original_response(
+                content="Αυτή η εντολή υποστηρίζεται μόνο σε κείμενα καναλιών."
+            )
 
     except Exception as e:
         print(f"Fallback Chain Exhausted: {e}")
-        await interaction.followup.send(
-            f"Υπήρξε πρόβλημα με τις υπηρεσίες AI: `{e}`"
+        await interaction.edit_original_response(
+            content=f"⚠️ Υπήρξε πρόβλημα με τις υπηρεσίες AI: `{e}`"
         )
 
 
