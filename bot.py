@@ -6,7 +6,7 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 import aiohttp
-import google.generativeai as genai
+from google import genai
 from groq import AsyncGroq
 
 load_dotenv()
@@ -15,11 +15,9 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Αρχικοποίηση Clients
+# Αρχικοποίηση SDK Clients
 groq_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
-
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -45,9 +43,9 @@ async def on_ready():
 
 async def call_gemini_rest_fallback(prompt: str) -> str:
     """
-    Direct REST API Call στο Gemini αν αποτύχει το SDK.
+    Direct REST HTTP Call στο Gemini API (χωρίς εξάρτηση από SDKs).
     """
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}]
     }
@@ -59,7 +57,7 @@ async def call_gemini_rest_fallback(prompt: str) -> str:
                 return data['candidates'][0]['content']['parts'][0]['text']
             else:
                 err_text = await resp.text()
-                raise RuntimeError(f"Gemini REST Error {resp.status}: {err_text}")
+                raise RuntimeError(f"Gemini REST HTTP Error {resp.status}: {err_text}")
 
 
 async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> str:
@@ -67,13 +65,13 @@ async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> s
     full_prompt = f"{system_prompt}\n\nΙστορικό Συνομιλίας:\n{chat_log}"
 
     # ---------------------------------------------------------
-    # 1. GROQ PROVIDER
+    # 1. GROQ SDK (llama-3.3-70b-versatile, llama-3.1-8b-instant)
     # ---------------------------------------------------------
     if groq_client:
-        groq_models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"]
+        groq_models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
         for model_name in groq_models:
             try:
-                print(f"[Groq] Δοκιμή με {model_name}...")
+                print(f"[Groq SDK] Δοκιμή με {model_name}...")
                 response = await groq_client.chat.completions.create(
                     model=model_name,
                     messages=[
@@ -85,25 +83,24 @@ async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> s
                 )
                 summary = response.choices[0].message.content
                 if summary and summary.strip():
-                    print(f"[Groq SUCCESS] {model_name}")
+                    print(f"[Groq SDK SUCCESS] {model_name}")
                     return summary
             except Exception as e:
-                last_error = f"Groq ({model_name}): {e}"
-                print(f"[Groq ERROR] {last_error}")
+                last_error = f"Groq SDK ({model_name}): {e}"
+                print(f"[Groq SDK ERROR] {last_error}")
 
     # ---------------------------------------------------------
-    # 2. GEMINI PROVIDER (Standard SDK)
+    # 2. GEMINI SDK (google.genai - gemini-2.5-flash)
     # ---------------------------------------------------------
-    if GEMINI_API_KEY:
-        gemini_models = ["gemini-1.5-flash", "gemini-1.5-pro"]
+    if gemini_client:
+        gemini_models = ["gemini-2.5-flash", "gemini-1.5-flash"]
         for model_name in gemini_models:
             try:
                 print(f"[Gemini SDK] Δοκιμή με {model_name}...")
-                model = genai.GenerativeModel(
-                    model_name=model_name,
-                    system_instruction=system_prompt
+                response = await gemini_client.aio.models.generate_content(
+                    model=model_name,
+                    contents=full_prompt,
                 )
-                response = await model.generate_content_async(f"Ιστορικό Συνομιλίας:\n{chat_log}")
                 summary = response.text
                 if summary and summary.strip():
                     print(f"[Gemini SDK SUCCESS] {model_name}")
@@ -112,9 +109,10 @@ async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> s
                 last_error = f"Gemini SDK ({model_name}): {e}"
                 print(f"[Gemini SDK ERROR] {last_error}")
 
-        # ---------------------------------------------------------
-        # 3. GEMINI REST FALLBACK (Όταν όλα τα SDKs αποτύχουν)
-        # ---------------------------------------------------------
+    # ---------------------------------------------------------
+    # 3. GEMINI REST API FALLBACK (Απευθείας HTTP Call)
+    # ---------------------------------------------------------
+    if GEMINI_API_KEY:
         try:
             print("[Gemini REST] Δοκιμή απευθείας HTTP κλήσης...")
             summary = await call_gemini_rest_fallback(full_prompt)
