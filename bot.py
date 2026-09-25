@@ -56,15 +56,9 @@ async def daily_summary_task():
 
         print(f"[Daily Summary] Εκτέλεση ημερήσιας σύνοψης για το κανάλι #{channel.name}...")
         try:
-            summary_embed = await process_tldr_logic(channel, hours=24)
-
-            # Extra header embed για την πρωινή ανακοίνωση
-            announcement_embed = discord.Embed(
-                title="☀️ Καλημέρα! Η Ημερήσια Σύνοψη είναι έτοιμη",
-                description="Ορίστε τι συνέβη στο κανάλι τις τελευταίες **24 ώρες**:",
-                color=discord.Color.gold()
-            )
-            await channel.send(embeds=[announcement_embed, summary_embed])
+            summary_text = await process_tldr_logic(channel, hours=24)
+            message = f"☀️ **Καλημέρα! Η Ημερήσια Σύνοψη (24ωρο) είναι έτοιμη:**\n\n{summary_text}"
+            await channel.send(message)
             print("[Daily Summary Success] Η ημερήσια σύνοψη απεστάλη επιτυχώς!")
         except Exception as e:
             print(f"[Daily Summary Exception] {e}")
@@ -82,7 +76,6 @@ async def before_daily_summary():
 async def on_ready():
     print(f"Logged in as {bot.user.name} (ID: {bot.user.id})")
 
-    # Εκκίνηση του daily task
     if not daily_summary_task.is_running():
         daily_summary_task.start()
         print("[Task Manager] Το Daily Summary Loop ξεκίνησε!")
@@ -100,7 +93,6 @@ async def on_ready():
 
 
 async def get_active_groq_models() -> list[str]:
-    """Φέρνει δυναμικά τα ενεργά μοντέλα από την Groq."""
     if not groq_client:
         return []
     try:
@@ -114,7 +106,6 @@ async def get_active_groq_models() -> list[str]:
 
 
 async def get_active_gemini_models() -> list[str]:
-    """Φέρνει δυναμικά τα ενεργά μοντέλα από το Gemini SDK."""
     if not gemini_client:
         return []
     try:
@@ -131,7 +122,6 @@ async def get_active_gemini_models() -> list[str]:
 
 
 async def call_gemini_rest_fallback(prompt: str, model_name: str) -> str:
-    """Direct REST HTTP Call στο Gemini API ως έσχατη λύση."""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
 
@@ -198,8 +188,8 @@ async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> s
     raise RuntimeError(f"Αποτυχία όλων των APIs:\n• {all_errors_str}")
 
 
-async def process_tldr_logic(channel: discord.TextChannel, hours: int, status_message: discord.WebhookMessage = None) -> discord.Embed:
-    """Κύρια λογική συλλογής μηνυμάτων & παραγωγής Embed σύνοψης."""
+async def process_tldr_logic(channel: discord.TextChannel, hours: int, status_message: discord.WebhookMessage = None) -> str:
+    """Κύρια λογική συλλογής μηνυμάτων & παραγωγής σύνοψης σε κείμενο."""
     if status_message:
         await status_message.edit(content="🔍 **Στάδιο 1/2:** Συλλογή μηνυμάτων καναλιού...")
 
@@ -214,12 +204,7 @@ async def process_tldr_logic(channel: discord.TextChannel, hours: int, status_me
         messages_list.append(f"[{timestamp}] {message.author.display_name}: {message.content}")
 
     if not messages_list:
-        embed = discord.Embed(
-            title="📭 Δεν βρέθηκαν μηνύματα",
-            description=f"Δεν υπήρξε δραστηριότητα στο κανάλι τις τελευταίες **{hours}** ώρες.",
-            color=discord.Color.orange()
-        )
-        return embed
+        return f"📭 Δεν βρέθηκαν νέα μηνύματα τις τελευταίες {hours} ώρες."
 
     if status_message:
         await status_message.edit(content=f"🧠 **Στάδιο 2/2:** Ανάλυση {len(messages_list)} μηνυμάτων με AI...")
@@ -242,15 +227,13 @@ async def process_tldr_logic(channel: discord.TextChannel, hours: int, status_me
 
     summary = await generate_summary_with_fallback(system_prompt, chat_log)
 
-    # Δημιουργία Discord Embed
-    embed = discord.Embed(
-        title=f"📝 TL;DR - Τελευταίες {hours} Ώρες",
-        description=summary if len(summary) <= 4000 else summary[:3900] + "\n\n*(Η σύνοψη κόπηκε λόγω ορίου)*",
-        color=discord.Color.blurple(),
-        timestamp=datetime.now(timezone.utc)
-    )
-    embed.set_footer(text=f"Αναλύθηκαν {len(messages_list)} μηνύματα • Powered by AI")
-    return embed
+    header = f"**TL;DR Τελευταίων {hours} Ωρών** 📝\n\n"
+    full_response = header + summary
+
+    if len(full_response) > 2000:
+        full_response = full_response[:1900] + "\n...\n*(Η σύνοψη κόπηκε λόγω ορίου χαρακτήρων)*"
+
+    return full_response
 
 
 # ---------------------------------------------------------
@@ -282,18 +265,16 @@ async def tldr(interaction: discord.Interaction, hours: int):
         )
         return
 
-    # Defer με live message update
     await interaction.response.defer(thinking=True)
     status_msg = await interaction.original_response()
 
     try:
-        summary_embed = await process_tldr_logic(interaction.channel, hours, status_message=status_msg)
+        summary_text = await process_tldr_logic(interaction.channel, hours, status_message=status_msg)
 
         # Ενημέρωση timestamp μόνο αν παράχθηκε επιτυχώς σύνοψη
         last_used[channel_id] = time.time()
 
-        # Καθαρισμός του status text και αποστολή του Embed
-        await interaction.followup.send(embed=summary_embed)
+        await interaction.followup.send(summary_text)
         await status_msg.delete()  # Διαγράφει το προσωρινό μήνυμα κατάστασης
 
     except Exception as e:
