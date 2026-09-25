@@ -157,24 +157,42 @@ async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> s
 
 
 async def fetch_and_generate_tldr(channel: discord.TextChannel, hours: int) -> str | None:
-    cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
-    messages_list = []
+    now = datetime.now(timezone.utc)
+    
+    # 1. Καθορισμός χρονικών ορίων
+    target_cutoff = now - timedelta(hours=hours)
+    # Το context θα είναι 24 ώρες πίσω (ή τουλάχιστον διπλάσιο αν ο χρήστης ζητήσει >12 ώρες)
+    context_hours = max(24, hours * 2)
+    context_cutoff = now - timedelta(hours=context_hours)
 
-    async for message in channel.history(after=cutoff_time, limit=500):
+    target_messages = []
+    context_messages = []
+
+    # Μαζεύουμε μηνύματα μέχρι το context_cutoff (π.χ. 24 ώρες)
+    async for message in channel.history(after=context_cutoff, limit=600):
         if message.author.bot or not message.content.strip():
             continue
 
         timestamp = message.created_at.strftime("%H:%M")
-        messages_list.append(
-            f"[{timestamp}] {message.author.display_name}: {message.content}"
-        )
+        formatted_msg = f"[{timestamp}] {message.author.display_name}: {message.content}"
 
-    if not messages_list:
+        if message.created_at >= target_cutoff:
+            target_messages.append(formatted_msg)
+        else:
+            context_messages.append(formatted_msg)
+
+    # Αν δεν υπάρχουν νέα μηνύματα στο χρονικό παράθυρο που ζητήθηκε, επιστρέφουμε None
+    if not target_messages:
         return None
 
-    chat_log = "\n".join(messages_list)
-    if len(chat_log) > 15000:
-        chat_log = chat_log[-15000:]
+    # Προετοιμασία κειμένων με όριο χαρακτήρων για να μην ξεπεράσουμε τα tokens
+    context_log = "\n".join(context_messages)
+    if len(context_log) > 8000:
+        context_log = context_log[-8000:]  # Κρατάμε τα πιο πρόσφατα του context
+
+    target_log = "\n".join(target_messages)
+    if len(target_log) > 10000:
+        target_log = target_log[-10000:]
 
     system_prompt = (
         "Είσαι ένας γραμματέας Discord. Η δουλειά σου είναι να διαβάζεις"
