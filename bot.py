@@ -163,11 +163,7 @@ async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> s
     raise RuntimeError(f"Αποτυχία όλων των APIs:\n• {all_errors_str}")
 
 
-async def fetch_and_generate_tldr(
-    channel: discord.TextChannel, 
-    hours: int, 
-    status_callback=None
-) -> str | None:
+async def fetch_and_generate_tldr(channel: discord.TextChannel, hours: int) -> str | None:
     now = datetime.now(timezone.utc)
     
     target_cutoff = now - timedelta(hours=hours)
@@ -177,11 +173,7 @@ async def fetch_and_generate_tldr(
     target_messages = []
     context_messages = []
 
-    if status_callback:
-        await status_callback(f"📥 Ανάκτηση μηνυμάτων τελευταίων {hours} ωρών...")
-
-    # Μαζεύουμε μηνύματα
-    async for message in channel.history(after=context_cutoff, limit=1200):
+    async for message in channel.history(after=context_cutoff, limit=600):
         if message.author.bot or not message.content.strip():
             continue
 
@@ -196,19 +188,13 @@ async def fetch_and_generate_tldr(
     if not target_messages:
         return None
 
-    if status_callback:
-        total_msgs = len(target_messages) + len(context_messages)
-        await status_callback(
-            f"🧠 Αναλύθηκαν **{total_msgs}** μηνύματα! Αποστολή στο AI για επεξεργασία..."
-        )
-
     context_log = "\n".join(context_messages)
-    if len(context_log) > 6000:
-        context_log = context_log[-6000:]
+    if len(context_log) > 8000:
+        context_log = context_log[-8000:]
 
     target_log = "\n".join(target_messages)
-    if len(target_log) > 15000:
-        target_log = target_log[-15000:]
+    if len(target_log) > 10000:
+        target_log = target_log[-10000:]
 
     system_prompt = (
         "Είσαι ένας γραμματέας Discord. Η δουλειά σου είναι να διαβάζεις"
@@ -290,25 +276,14 @@ async def tldr(interaction: discord.Interaction, hours: int):
 
     await interaction.response.defer(thinking=True)
 
-    # Συνάρτηση για να ενημερώνουμε το status στο Discord
-    async def update_status(text: str):
-        try:
-            await interaction.edit_original_response(content=text)
-        except Exception:
-            pass
-
     try:
         channel = interaction.channel
         if isinstance(channel, discord.TextChannel):
-            summary = await fetch_and_generate_tldr(
-                channel, 
-                hours=hours, 
-                status_callback=update_status
-            )
+            summary = await fetch_and_generate_tldr(channel, hours=hours)
 
             if not summary:
-                await interaction.edit_original_response(
-                    content=f"Δεν βρέθηκαν νέα μηνύματα τις τελευταίες {hours} ώρες."
+                await interaction.followup.send(
+                    f"Δεν βρέθηκαν νέα μηνύματα τις τελευταίες {hours} ώρες."
                 )
                 return
 
@@ -316,17 +291,14 @@ async def tldr(interaction: discord.Interaction, hours: int):
             header = f"**TL;DR Τελευταίων {hours} Ωρών** 📝\n\n"
             final_msg = fit_to_discord_limit(header, summary)
 
-            # Στέλνουμε το τελικό αποτέλεσμα αντικαθιστώντας το status
-            await interaction.edit_original_response(content=final_msg)
+            await interaction.followup.send(final_msg)
         else:
-            await interaction.edit_original_response(
-                content="Αυτή η εντολή υποστηρίζεται μόνο σε κείμενα καναλιών."
-            )
+            await interaction.followup.send("Αυτή η εντολή υποστηρίζεται μόνο σε κείμενα καναλιών.")
 
     except Exception as e:
         print(f"Fallback Chain Exhausted: {e}")
-        await interaction.edit_original_response(
-            content=f"⚠️ Υπήρξε πρόβλημα με τις υπηρεσίες AI: `{e}`"
+        await interaction.followup.send(
+            f"Υπήρξε πρόβλημα με τις υπηρεσίες AI: `{e}`"
         )
 
 
