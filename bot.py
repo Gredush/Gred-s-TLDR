@@ -43,49 +43,32 @@ async def on_ready():
 
 async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> str:
     """
-    Δοκιμάζει διαδοχικά Groq και Gemini με αυτόματη εύρεση διαθέσιμων μοντέλων.
+    Αναζητά δυναμικά τα διαθέσιμα/ενεργά μοντέλα από Groq & Gemini
+    ώστε να μην "σπάει" ποτέ από αποσύρσεις (decommissioning).
     """
     last_error = None
     full_prompt = f"{system_prompt}\n\nΙστορικό Συνομιλίας:\n{chat_log}"
 
     # ---------------------------------------------------------
-    # 1. ΔΟΚΙΜΗ ΜΕ GEMINI (Δυναμική λίστα μοντέλων + Fallback)
-    # ---------------------------------------------------------
-    if gemini_client:
-        gemini_models = []
-        try:
-            # Λαμβάνουμε δυναμικά τα διαθέσιμα μοντέλα από το Google API
-            async for m in gemini_client.aio.models.list():
-                if "generateContent" in getattr(m, "supported_generation_methods", []) or "flash" in m.name:
-                    model_id = m.name.replace("models/", "")
-                    gemini_models.append(model_id)
-        except Exception as e:
-            print(f"[Gemini List Models Warning] {e}")
-
-        # Αν αποτύχει το list(), χρησιμοποιούμε τα τρέχοντα default slugs
-        if not gemini_models:
-            gemini_models = ["gemini-3.8-flash", "gemini-2.5-flash"]
-
-        for model_name in gemini_models:
-            try:
-                print(f"[Gemini] Δοκιμή με μοντέλο: {model_name}...")
-                response = await gemini_client.aio.models.generate_content(
-                    model=model_name,
-                    contents=full_prompt,
-                )
-                summary = response.text
-                if summary and summary.strip():
-                    print(f"[Gemini] Επιτυχία με το {model_name}!")
-                    return summary
-            except Exception as e:
-                last_error = f"Gemini ({model_name}): {e}"
-                print(f"[Gemini ERROR] {last_error}")
-
-    # ---------------------------------------------------------
-    # 2. ΔΟΚΙΜΗ ΜΕ GROQ (Ενημερωμένα slugs)
+    # 1. ΔΟΚΙΜΗ ΜΕ GROQ (Δυναμική λίστα ενεργών μοντέλων)
     # ---------------------------------------------------------
     if groq_client:
-        groq_models = ["llama3-70b-8192", "llama3-8b-8192"]
+        groq_models = []
+        try:
+            models_page = await groq_client.models.list()
+            # Φιλτράρουμε μόνο τα ενεργά Llama / Mixtral μοντέλα
+            for m in models_page.data:
+                m_id = m.id.lower()
+                if "llama" in m_id or "mixtral" in m_id:
+                    groq_models.append(m.id)
+            print(f"[Groq] Βρέθηκαν διαθέσιμα μοντέλα: {groq_models}")
+        except Exception as e:
+            print(f"[Groq List Models Warning] {e}")
+
+        # Fallback αν αποτύχει το list()
+        if not groq_models:
+            groq_models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+
         for model_name in groq_models:
             try:
                 print(f"[Groq] Δοκιμή με μοντέλο: {model_name}...")
@@ -105,6 +88,38 @@ async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> s
             except Exception as e:
                 last_error = f"Groq ({model_name}): {e}"
                 print(f"[Groq ERROR] {last_error}")
+
+    # ---------------------------------------------------------
+    # 2. ΔΟΚΙΜΗ ΜΕ GEMINI (Δυναμική λίστα μοντέλων Google)
+    # ---------------------------------------------------------
+    if gemini_client:
+        gemini_models = []
+        try:
+            async for m in gemini_client.aio.models.list():
+                model_id = m.name.replace("models/", "")
+                if "flash" in model_id or "generateContent" in getattr(m, "supported_generation_methods", []):
+                    gemini_models.append(model_id)
+            print(f"[Gemini] Βρέθηκαν διαθέσιμα μοντέλα: {gemini_models}")
+        except Exception as e:
+            print(f"[Gemini List Models Warning] {e}")
+
+        if not gemini_models:
+            gemini_models = ["gemini-2.5-flash", "gemini-2.0-flash"]
+
+        for model_name in gemini_models:
+            try:
+                print(f"[Gemini] Δοκιμή με μοντέλο: {model_name}...")
+                response = await gemini_client.aio.models.generate_content(
+                    model=model_name,
+                    contents=full_prompt,
+                )
+                summary = response.text
+                if summary and summary.strip():
+                    print(f"[Gemini] Επιτυχία με το {model_name}!")
+                    return summary
+            except Exception as e:
+                last_error = f"Gemini ({model_name}): {e}"
+                print(f"[Gemini ERROR] {last_error}")
 
     raise RuntimeError(f"Όλα τα AI APIs απέτυχαν. Τελευταίο σφάλμα: {last_error}")
 
