@@ -14,7 +14,6 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not DISCORD_TOKEN or not GROQ_API_KEY:
     print("CRITICAL ERROR: Λείπουν τα API Keys (DISCORD_TOKEN ή GROQ_API_KEY)!")
 
-# Αρχικοποίηση Async Groq Client
 groq_client = AsyncGroq(api_key=GROQ_API_KEY)
 
 intents = discord.Intents.default()
@@ -22,7 +21,6 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Βάλε το ID του server σου αν θέλεις ακαριαίο sync (π.χ. discord.Object(id=123456789))
 GUILD_ID = None
 
 
@@ -88,8 +86,8 @@ async def tldr(interaction: discord.Interaction, hours: int):
         " υπήρχαν σημαντικές αποφάσεις ή links."
     )
 
-    # Μόνο τα ενεργά και έγκυρα μοντέλα του Groq
-    candidate_models = ["llama-3.1-8b-instant", "llama-3.3-70b-specdec"]
+    # Τα επίσημα υποστηριζόμενα μοντέλα της Groq
+    candidate_models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
 
     summary = None
     last_error = None
