@@ -6,15 +6,25 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from google import genai
 
-# Φόρτωση περιβαλλοντικών μεταβλητών
+# Φόρτωση τοπικού .env αν υπάρχει
 load_dotenv()
+
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Αρχικοποίηση Gemini Client
+# Έλεγχος αν βρέθηκαν τα keys
+if not DISCORD_TOKEN:
+    print(
+        "CRITICAL ERROR: Το DISCORD_TOKEN δεν βρέθηκε στις μεταβλητές περιβάλλοντος!"
+    )
+if not GEMINI_API_KEY:
+    print(
+        "CRITICAL ERROR: Το GEMINI_API_KEY δεν βρέθηκε στις μεταβλητές περιβάλλοντος!"
+    )
+
+# Αρχικοποίηση client περνώντας ρητά το key
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Intents για το Discord Bot
 intents = discord.Intents.default()
 intents.message_content = True
 
@@ -26,42 +36,31 @@ async def on_ready():
     print(f"Logged in as {bot.user.name} (ID: {bot.user.id})")
     try:
         synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} slash command(s)")
+        print(f"Synced {len(synced)} command(s)")
     except Exception as e:
-        print(f"Error syncing commands: {e}")
+        print(f"Sync error: {e}")
 
 
 @bot.tree.command(
     name="tldr",
-    description="Δημιουργεί σύνοψη (TL;DR) των μηνυμάτων του καναλιού για το χρονικό διάστημα που ορίζεις.",
+    description="Δημιουργεί σύνοψη (TL;DR) των μηνυμάτων του καναλιού.",
 )
-@app_commands.describe(
-    hours="Πόσες ώρες πίσω θέλεις να ανατρέξει το bot (π.χ. 2, 8, 24)"
-)
+@app_commands.describe(hours="Πόσες ώρες πίσω να κοιτάξει (π.χ. 4)")
 async def tldr(interaction: discord.Interaction, hours: int):
-    # Ενημέρωση του Discord ότι η επεξεργασία θα πάρει λίγο χρόνο
     await interaction.response.defer(thinking=True)
 
     if hours <= 0 or hours > 72:
-        await interaction.followup.send(
-            "Παρακαλώ δώσε αριθμό ωρών μεταξύ 1 και 72."
-        )
+        await interaction.followup.send("Δώσε αριθμό ωρών μεταξύ 1 και 72.")
         return
 
-    # Υπολογισμός χρονικού ορίου
     cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
-
     messages_list = []
+
     async for message in interaction.channel.history(
         after=cutoff_time, limit=500
     ):
-        # Αγνοούμε μηνύματα από bots
-        if message.author.bot:
+        if message.author.bot or not message.content.strip():
             continue
-        # Παράκαμψη κενών μηνυμάτων (π.χ. μόνο εικόνες/embeds)
-        if not message.content.strip():
-            continue
-
         timestamp = message.created_at.strftime("%H:%M")
         messages_list.append(
             f"[{timestamp}] {message.author.display_name}: {message.content}"
@@ -75,17 +74,9 @@ async def tldr(interaction: discord.Interaction, hours: int):
 
     chat_log = "\n".join(messages_list)
 
-    # Prompt για το LLM
     prompt = f"""
-Είσαι ένας βοηθός Discord bot. Παρακάτω είναι μια συνομιλία από ένα Discord κανάλι που περιέχει ελληνικά, greeklish και αγγλικά.
-
-Στόχος σου είναι να φτιάξεις ένα καθαρό, δομημένο TL;DR (σύνοψη) στα Ελληνικά για να καταλάβει ο χρήστης τι έχασε όσο έλειπε.
-
-Οδηγίες:
-- Ομάδοποίησε τα κύρια θέματα συζήτησης σε bullet points.
-- Αναέφερε ποιοι χρήστες συμμετείχαν στα βασικά θέματα αν είναι σχετικό.
-- Αν υπήρχαν σημαντικές αποφάσεις, links ή ανακοινώσεις, σημείωσέ τες.
-- Κράτα το ύφος φιλικό και σύντομο.
+Είσαι ένας βοηθός Discord bot. Παρακάτω είναι μια συνομιλία από ένα Discord κανάλι (Ελληνικά, Greeklish, Αγγλικά).
+Στόχος σου είναι να φτιάξεις ένα καθαρό, δομημένο TL;DR (σύνοψη) στα Ελληνικά με bullet points.
 
 Ιστορικό Συνομιλίας:
 {chat_log}
@@ -98,17 +89,18 @@ async def tldr(interaction: discord.Interaction, hours: int):
         )
         summary = response.text
 
-        # Όριο Discord μηνύματος: 2000 χαρακτήρες
         header = f"**TL;DR Τελευταίων {hours} Ωρών** 📝\n\n"
         if len(header + summary) > 2000:
-            summary = summary[: 1900 - len(header)] + "...\n*(Η σύνοψη κόπηκε λόγω ορίου χαρακτήρων)*"
+            summary = (
+                summary[: 1900 - len(header)]
+                + "...\n*(Η σύνοψη κόπηκε λόγω ορίου)*"
+            )
 
         await interaction.followup.send(header + summary)
-
     except Exception as e:
-        print(f"Error generating summary: {e}")
+        print(f"Gemini API Error: {e}")
         await interaction.followup.send(
-            "Υπήρξε σφάλμα κατά τη δημιουργία της σύνοψης. Παρακαλώ δοκίμασε ξανά."
+            "Σφάλμα κατά τη δημιουργία της σύνοψης."
         )
 
 
