@@ -49,13 +49,12 @@ async def on_ready():
         if GUILD_ID:
             bot.tree.copy_global_to(guild=GUILD_ID)
             synced = await bot.tree.sync(guild=GUILD_ID)
-            print(f"Synced {len(synced)} command(s) to Guild {GUILD_ID.id}")
         else:
             synced = await bot.tree.sync()
-            print(f"Synced {len(synced)} command(s) globally.")
     except Exception as e:
         print(f"Sync error: {e}")
 
+    # Ξεκινάει το task, αλλά περιμένει 8 ώρες πριν την πρώτη εκτέλεση!
     if not auto_tldr_task.is_running():
         auto_tldr_task.start()
 
