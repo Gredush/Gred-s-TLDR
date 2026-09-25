@@ -6,28 +6,20 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 # API SDKs
-from google import genai
+import google.generativeai as genai
 from groq import AsyncGroq
-from openai import AsyncOpenAI
 
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 # Αρχικοποίηση Clients
 groq_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
-gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
-openrouter_client = (
-    AsyncOpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=OPENROUTER_API_KEY,
-    )
-    if OPENROUTER_API_KEY
-    else None
-)
+
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -53,46 +45,31 @@ async def on_ready():
 
 async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> str:
     """
-    Δοκιμάζει διαδοχικά Providers και Models μέχρι να βρει ένα που απαντάει.
+    Δοκιμάζει διαδοχικά Groq και Gemini με τα πιο σταθερά μοντέλα.
     """
     providers = []
 
     # 1. Groq Provider
     if groq_client:
         providers.append(
-            ("Groq", groq_client, ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"])
+            ("Groq", ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"])
         )
 
-    # 2. Gemini Provider
-    if gemini_client:
+    # 2. Gemini Provider (Google Official)
+    if GEMINI_API_KEY:
         providers.append(
-            ("Gemini", gemini_client, ["gemini-2.5-flash", "gemini-2.0-flash"])
+            ("Gemini", ["gemini-1.5-flash", "gemini-1.5-pro"])
         )
 
-    # 3. OpenRouter Provider (Ενεργά Free Models)
-    if openrouter_client:
-        providers.append(
-            (
-                "OpenRouter",
-                openrouter_client,
-                [
-                    "google/gemini-2.0-flash-lite-001:free",
-                    "deepseek/deepseek-r1:free",
-                    "qwen/qwen-2.5-coder-32b-instruct:free",
-                    "mistralai/mistral-7b-instruct:free",
-                ],
-            )
-        )
+    last_error = "Δεν βρέθηκε διαθέσιμο API Key (GROQ_API_KEY ή GEMINI_API_KEY)."
 
-    last_error = "Δεν βρέθηκε διαθέσιμο API Key."
-
-    for provider_name, client, models in providers:
+    for provider_name, models in providers:
         for model_name in models:
             try:
                 print(f"Trying provider: {provider_name} | Model: {model_name}...")
 
                 if provider_name == "Groq":
-                    response = await client.chat.completions.create(
+                    response = await groq_client.chat.completions.create(
                         model=model_name,
                         messages=[
                             {"role": "system", "content": system_prompt},
@@ -104,24 +81,15 @@ async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> s
                     summary = response.choices[0].message.content
 
                 elif provider_name == "Gemini":
-                    full_prompt = f"{system_prompt}\n\nΙστορικό Συνομιλίας:\n{chat_log}"
-                    response = await client.aio.models.generate_content(
-                        model=model_name,
-                        contents=full_prompt,
+                    model = genai.GenerativeModel(
+                        model_name=model_name,
+                        system_instruction=system_prompt
+                    )
+                    # Χρήση generate_content_async για να μην μπλοκάρει το event loop
+                    response = await model.generate_content_async(
+                        f"Ιστορικό Συνομιλίας:\n{chat_log}"
                     )
                     summary = response.text
-
-                elif provider_name == "OpenRouter":
-                    response = await client.chat.completions.create(
-                        model=model_name,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": f"Ιστορικό Συνομιλίας:\n{chat_log}"},
-                        ],
-                        temperature=0.5,
-                        max_tokens=1000,
-                    )
-                    summary = response.choices[0].message.content
 
                 if summary and summary.strip():
                     print(f"Success with {provider_name} ({model_name})!")
@@ -196,7 +164,7 @@ async def tldr(interaction: discord.Interaction, hours: int):
     except Exception as e:
         print(f"Fallback Chain Exhausted: {e}")
         await interaction.followup.send(
-            f"Υπήρξε πρόβλημα με όλες τις υπηρεσίες AI: `{e}`"
+            f"Υπήρξε πρόβλημα με τις υπηρεσίες AI: `{e}`"
         )
 
 
