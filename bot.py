@@ -173,7 +173,7 @@ async def fetch_and_generate_tldr(channel: discord.TextChannel, hours: int) -> s
     target_messages = []
     context_messages = []
 
-    async for message in channel.history(after=context_cutoff, limit=600):
+    async for message in channel.history(after=context_cutoff, limit=5000):
         if message.author.bot or not message.content.strip():
             continue
 
@@ -189,12 +189,12 @@ async def fetch_and_generate_tldr(channel: discord.TextChannel, hours: int) -> s
         return None
 
     context_log = "\n".join(context_messages)
-    if len(context_log) > 8000:
-        context_log = context_log[-8000:]
+    if len(context_log) > 24000:
+        context_log = context_log[-24000:]
 
     target_log = "\n".join(target_messages)
-    if len(target_log) > 10000:
-        target_log = target_log[-10000:]
+    if len(target_log) > 60000:
+        target_log = target_log[-60000:]
 
     system_prompt = (
         "Είσαι ένας γραμματέας Discord. Η δουλειά σου είναι να διαβάζεις"
