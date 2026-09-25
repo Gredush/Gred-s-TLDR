@@ -241,10 +241,13 @@ async def auto_tldr_task():
         print(f"[Auto TLDR Error] {e}")
 
 
+import asyncio
+
 @auto_tldr_task.before_loop
 async def before_auto_tldr():
     await bot.wait_until_ready()
-
+    # Περίμενε 8 ώρες (8 * 3600 δευτερόλεπτα) πριν την πρώτη αυτόματη εκτέλεση
+    await asyncio.sleep(8 * 3600)
 
 @bot.tree.command(
     name="tldr",
