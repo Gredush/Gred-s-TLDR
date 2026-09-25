@@ -88,37 +88,44 @@ async def tldr(interaction: discord.Interaction, hours: int):
         " υπήρχαν σημαντικές αποφάσεις ή links."
     )
 
-    try:
-        # Κλήση του Groq API (Llama 3.3 70B)
-        response = await groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": f"Ιστορικό Συνομιλίας:\n{chat_log}",
-                },
-            ],
-            temperature=0.5,
-            max_tokens=1000,
-        )
+    # Λίστα με έγκυρα μοντέλα στο Groq
+    candidate_models = ["llama-3.1-8b-instant", "llama3-70b-8192", "mixtral-8x7b-32768"]
+    
+    summary = None
+    last_error = None
 
-        summary = response.choices[0].message.content
-
-        header = f"**TL;DR Τελευταίων {hours} Ωρών** 📝\n\n"
-        if len(header + summary) > 2000:
-            summary = (
-                summary[: 1900 - len(header)]
-                + "...\n*(Η σύνοψη κόπηκε λόγω ορίου χαρακτήρων)*"
+    for model_name in candidate_models:
+        try:
+            response = await groq_client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Ιστορικό Συνομιλίας:\n{chat_log}"},
+                ],
+                temperature=0.5,
+                max_tokens=1000,
             )
+            summary = response.choices[0].message.content
+            if summary:
+                break
+        except Exception as e:
+            last_error = e
+            print(f"Groq model {model_name} failed: {e}")
 
-        await interaction.followup.send(header + summary)
-
-    except Exception as e:
-        print(f"Groq API Error: {e}")
+    if not summary:
         await interaction.followup.send(
-            f"Υπήρξε σφάλμα κατά τη επικοινωνία με το AI API: `{e}`"
+            f"Υπήρξε σφάλμα κατά τη επικοινωνία με το AI API: `{last_error}`"
         )
+        return
+
+    header = f"**TL;DR Τελευταίων {hours} Ωρών** 📝\n\n"
+    if len(header + summary) > 2000:
+        summary = (
+            summary[: 1900 - len(header)]
+            + "...\n*(Η σύνοψη κόπηκε λόγω ορίου χαρακτήρων)*"
+        )
+
+    await interaction.followup.send(header + summary)
 
 
 bot.run(DISCORD_TOKEN)
