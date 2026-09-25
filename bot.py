@@ -29,6 +29,13 @@ GUILD_ID = None
 COOLDOWN_SECONDS = 1800
 last_used = {}
 
+# Ορισμός τοπικής ζώνης ώρας (Ελλάδα / EEST / EET)
+# Ή αν ο server τρέχει σε UTC, μπορείς να αλλάξεις τις ώρες αντίστοιχα.
+# Εδώ ορίζουμε 10:00 και 18:00 σε UTC (προσαρμόζεις αν ο server έχει τοπική ώρα).
+SCHEDULED_TIMES = [
+    dt_time(hour=10, minute=0, tzinfo=timezone.utc),
+    dt_time(hour=18, minute=0, tzinfo=timezone.utc),
+]
 
 def fit_to_discord_limit(header: str, text: str, max_limit: int = 1980) -> str:
     """Διασφαλίζει ότι το συνολικό μήνυμα δεν ξεπερνά ποτέ το όριο του Discord (2000 chars)."""
