@@ -1,6 +1,7 @@
 import os
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, time as dtime
+from zoneinfo import ZoneInfo
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -28,6 +29,16 @@ GUILD_ID = None
 
 COOLDOWN_SECONDS = 1800
 last_used = {}
+
+# Ώρα Ελλάδας. Το tasks.loop(time=...) υπολογίζει το επόμενο τρέξιμο με βάση
+# το ρολόι (όχι πότε ξεκίνησε η διεργασία), οπότε ένα restart / redeploy
+# ΔΕΝ ξαναρχίζει κανένα μετρητή -- απλά περιμένει την επόμενη προγραμματισμένη ώρα.
+ATHENS_TZ = ZoneInfo("Europe/Athens")
+AUTO_TLDR_HOURS = 4  # κάθε πόσες ώρες, ξεκινώντας από τις 9πμ
+AUTO_TLDR_TIMES = [
+    dtime(hour=(9 + AUTO_TLDR_HOURS * i) % 24, minute=0, tzinfo=ATHENS_TZ)
+    for i in range(24 // AUTO_TLDR_HOURS)
+]
 
 
 def fit_to_discord_limit(header: str, text: str, max_limit: int = 1980) -> str:
@@ -195,8 +206,13 @@ async def fetch_and_generate_tldr(channel: discord.TextChannel, hours: int) -> s
     return await generate_summary_with_fallback(system_prompt, chat_log)
 
 
-@tasks.loop(hours=8)
+@tasks.loop(time=AUTO_TLDR_TIMES)
 async def auto_tldr_task():
+    """Τρέχει σε συγκεκριμένες ώρες ρολογιού (π.χ. 9:00, 13:00, 17:00, 21:00,
+    1:00, 5:00 ώρα Ελλάδας), όχι σε rolling interval από την εκκίνηση. Επειδή
+    το discord.py υπολογίζει την επόμενη εκτέλεση με βάση το ρολόι, ένα
+    restart/redeploy απλά περιμένει κανονικά την επόμενη προγραμματισμένη ώρα
+    -- δεν ξεκινάει νέο 4ωρο μέτρημα από την αρχή."""
     if not AUTO_TLDR_CHANNEL_ID:
         return
 
@@ -207,9 +223,9 @@ async def auto_tldr_task():
             channel = await bot.fetch_channel(channel_id)
 
         if isinstance(channel, discord.TextChannel):
-            summary = await fetch_and_generate_tldr(channel, hours=8)
+            summary = await fetch_and_generate_tldr(channel, hours=AUTO_TLDR_HOURS)
             if summary:
-                header = "🤖 **Αυτόματο TL;DR Τελευταίων 8 Ωρών** 📝\n\n"
+                header = f"🤖 **Αυτόματο TL;DR Τελευταίων {AUTO_TLDR_HOURS} Ωρών** 📝\n\n"
                 final_msg = fit_to_discord_limit(header, summary)
                 await channel.send(final_msg)
     except Exception as e:
