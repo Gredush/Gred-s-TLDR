@@ -203,12 +203,12 @@ async def fetch_and_generate_tldr(
         )
 
     context_log = "\n".join(context_messages)
-    if len(context_log) > 24000:
-        context_log = context_log[-24000:]
+    if len(context_log) > 12000:
+        context_log = context_log[-12000:]
 
     target_log = "\n".join(target_messages)
-    if len(target_log) > 60000:
-        target_log = target_log[-60000:]
+    if len(target_log) > 30000:
+        target_log = target_log[-30000:]
 
     system_prompt = (
         "Είσαι ένας γραμματέας Discord. Η δουλειά σου είναι να διαβάζεις"
