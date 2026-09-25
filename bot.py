@@ -1,6 +1,7 @@
+import asyncio
 import os
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time as dt_time, timedelta, timezone
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -37,6 +38,7 @@ SCHEDULED_TIMES = [
     dt_time(hour=18, minute=0, tzinfo=timezone.utc),
 ]
 
+
 def fit_to_discord_limit(header: str, text: str, max_limit: int = 1980) -> str:
     """Διασφαλίζει ότι το συνολικό μήνυμα δεν ξεπερνά ποτέ το όριο του Discord (2000 chars)."""
     full_text = header + text
@@ -61,7 +63,6 @@ async def on_ready():
     except Exception as e:
         print(f"Sync error: {e}")
 
-    # Ξεκινάει το task, αλλά περιμένει 8 ώρες πριν την πρώτη εκτέλεση!
     if not auto_tldr_task.is_running():
         auto_tldr_task.start()
 
@@ -165,16 +166,13 @@ async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> s
 async def fetch_and_generate_tldr(channel: discord.TextChannel, hours: int) -> str | None:
     now = datetime.now(timezone.utc)
     
-    # 1. Καθορισμός χρονικών ορίων
     target_cutoff = now - timedelta(hours=hours)
-    # Το context θα είναι 24 ώρες πίσω (ή τουλάχιστον διπλάσιο αν ο χρήστης ζητήσει >12 ώρες)
     context_hours = max(24, hours * 2)
     context_cutoff = now - timedelta(hours=context_hours)
 
     target_messages = []
     context_messages = []
 
-    # Μαζεύουμε μηνύματα μέχρι το context_cutoff (π.χ. 24 ώρες)
     async for message in channel.history(after=context_cutoff, limit=600):
         if message.author.bot or not message.content.strip():
             continue
@@ -187,14 +185,12 @@ async def fetch_and_generate_tldr(channel: discord.TextChannel, hours: int) -> s
         else:
             context_messages.append(formatted_msg)
 
-    # Αν δεν υπάρχουν νέα μηνύματα στο χρονικό παράθυρο που ζητήθηκε, επιστρέφουμε None
     if not target_messages:
         return None
 
-    # Προετοιμασία κειμένων με όριο χαρακτήρων για να μην ξεπεράσουμε τα tokens
     context_log = "\n".join(context_messages)
     if len(context_log) > 8000:
-        context_log = context_log[-8000:]  # Κρατάμε τα πιο πρόσφατα του context
+        context_log = context_log[-8000:]
 
     target_log = "\n".join(target_messages)
     if len(target_log) > 10000:
@@ -212,8 +208,7 @@ async def fetch_and_generate_tldr(channel: discord.TextChannel, hours: int) -> s
         "5. ΚΡΑΤΑ ΤΗ ΣΥΝΟΨΗ ΣΥΝΤΟΜΗ (κάτω από 250-280 λέξεις συνολικά).\n"
         "6. Σύνοψισε μόνο τι ειπώθηκε και τι συνέβη στο chat, χωρίς να βγάζεις δικά σου συμπεράσματα, κρίσεις ή ερμηνείες.\n"
         "7. Μείνε όσο πιο ουδέτερος και αντικειμενικός γίνεται.\n"
-        "8. Απαντάς ΜΟΝΟ στα Ελληνικά.\n"
-        
+        "8. Απαντάς ΜΟΝΟ στα Ελληνικά."
     )
 
     full_chat_payload = (
@@ -224,10 +219,10 @@ async def fetch_and_generate_tldr(channel: discord.TextChannel, hours: int) -> s
     )
 
     return await generate_summary_with_fallback(system_prompt, full_chat_payload)
-    return await generate_summary_with_fallback(system_prompt, chat_log)
 
 
-@tasks.loop(hours=8)
+# Εκτέλεση στις προγραμματισμένες ώρες (10:00 & 18:00)
+@tasks.loop(time=SCHEDULED_TIMES)
 async def auto_tldr_task():
     if not AUTO_TLDR_CHANNEL_ID:
         return
@@ -248,13 +243,10 @@ async def auto_tldr_task():
         print(f"[Auto TLDR Error] {e}")
 
 
-import asyncio
-
 @auto_tldr_task.before_loop
 async def before_auto_tldr():
     await bot.wait_until_ready()
-    # Περίμενε 8 ώρες (8 * 3600 δευτερόλεπτα) πριν την πρώτη αυτόματη εκτέλεση
-    await asyncio.sleep(8 * 3600)
+
 
 @bot.tree.command(
     name="tldr",
