@@ -4,18 +4,18 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
-from google import genai
+from groq import AsyncGroq
 
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-if not DISCORD_TOKEN or not GEMINI_API_KEY:
-    print("CRITICAL ERROR: Λείπουν τα API Keys!")
+if not DISCORD_TOKEN or not GROQ_API_KEY:
+    print("CRITICAL ERROR: Λείπουν τα API Keys (DISCORD_TOKEN ή GROQ_API_KEY)!")
 
-# Αρχικοποίηση Gemini Client
-ai_client = genai.Client(api_key=GEMINI_API_KEY)
+# Αρχικοποίηση Async Groq Client
+groq_client = AsyncGroq(api_key=GROQ_API_KEY)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -80,56 +80,45 @@ async def tldr(interaction: discord.Interaction, hours: int):
     if len(chat_log) > 15000:
         chat_log = chat_log[-15000:]
 
-    prompt = f"""
-Είσαι ένας βοηθός Discord bot. Παρακάτω είναι μια συνομιλία από ένα Discord κανάλι που περιέχει Ελληνικά, Greeklish και Αγγλικά.
+    system_prompt = (
+        "Είσαι ένας βοηθός Discord bot. Η δουλειά σου είναι να διαβάζεις"
+        " συνομιλίες (που περιέχουν Ελληνικά, Greeklish και Αγγλικά) και να"
+        " φτιάχνεις μια καθαρή, δομημένη σύνοψη (TL;DR) στα Ελληνικά με bullet"
+        " points. Αναέφερε ποιοι χρήστες συμμετείχαν στα βασικά θέματα και αν"
+        " υπήρχαν σημαντικές αποφάσεις ή links."
+    )
 
-Στόχος σου είναι να φτιάξεις ένα καθαρό, δομημένο TL;DR (σύνοψη) στα Ελληνικά για να καταλάβει ο χρήστης τι έχασε όσο έλειπε.
+    try:
+        # Κλήση του Groq API (Llama 3.3 70B)
+        response = await groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": f"Ιστορικό Συνομιλίας:\n{chat_log}",
+                },
+            ],
+            temperature=0.5,
+            max_tokens=1000,
+        )
 
-Οδηγίες:
-- Ομαδοποίησε τα κύρια θέματα συζήτησης σε bullet points.
-- Αναέφερε ποιοι χρήστες συμμετείχαν στα βασικά θέματα αν είναι σχετικό.
-- Αν υπήρχαν σημαντικές αποφάσεις, links ή ανακοινώσεις, σημείωσέ τες.
-- Κράτα το ύφος φιλικό και σύντομο.
+        summary = response.choices[0].message.content
 
-Ιστορικό Συνομιλίας:
-{chat_log}
-"""
-
-    # Λίστα με τα επίσημα μοντέλα
-    candidate_models = ["gemini-2.0-flash", "gemini-1.5-flash"]
-
-    summary = None
-    last_error = None
-
-    for model_name in candidate_models:
-        try:
-            # Async κλήση (ai_client.aio) για να μην παγώνει το bot
-            response = await ai_client.aio.models.generate_content(
-                model=model_name,
-                contents=prompt,
+        header = f"**TL;DR Τελευταίων {hours} Ωρών** 📝\n\n"
+        if len(header + summary) > 2000:
+            summary = (
+                summary[: 1900 - len(header)]
+                + "...\n*(Η σύνοψη κόπηκε λόγω ορίου χαρακτήρων)*"
             )
-            summary = response.text
-            if summary:
-                break
-        except Exception as e:
-            last_error = e
-            print(f"Model {model_name} failed: {type(e).__name__} - {e}")
 
-    if not summary:
-        print(f"ALL MODELS FAILED. Last error: {last_error}")
+        await interaction.followup.send(header + summary)
+
+    except Exception as e:
+        print(f"Groq API Error: {e}")
         await interaction.followup.send(
-            f"Σφάλμα επικοινωνίας με το API: `{last_error}`"
+            f"Υπήρξε σφάλμα κατά τη επικοινωνία με το AI API: `{e}`"
         )
-        return
-
-    header = f"**TL;DR Τελευταίων {hours} Ωρών** 📝\n\n"
-    if len(header + summary) > 2000:
-        summary = (
-            summary[: 1900 - len(header)]
-            + "...\n*(Η σύνοψη κόπηκε λόγω ορίου χαρακτήρων)*"
-        )
-
-    await interaction.followup.send(header + summary)
 
 
 bot.run(DISCORD_TOKEN)
