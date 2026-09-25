@@ -109,7 +109,7 @@ async def tldr(interaction: discord.Interaction, hours: int):
     try:
         # Κλήση του Gemini API με το σωστό μοντέλο
         response = ai_client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-3.8-flash",
             contents=prompt,
         )
         summary = response.text
