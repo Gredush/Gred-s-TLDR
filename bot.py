@@ -6,7 +6,7 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 # API SDKs
-import google.generativeai as genai
+from google import genai
 from groq import AsyncGroq
 
 load_dotenv()
@@ -17,9 +17,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # Αρχικοποίηση Clients
 groq_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
-
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -45,61 +43,59 @@ async def on_ready():
 
 async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> str:
     """
-    Δοκιμάζει διαδοχικά Groq και Gemini με τα πιο σταθερά μοντέλα.
+    Δοκιμάζει διαδοχικά Groq και Gemini.
     """
-    providers = []
+    last_error = None
 
-    # 1. Groq Provider
+    # ---------------------------------------------------------
+    # 1. ΔΟΚΙΜΗ ΜΕ GROQ (Τα 2 επίσημα ενεργά μοντέλα)
+    # ---------------------------------------------------------
     if groq_client:
-        providers.append(
-            ("Groq", ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"])
-        )
-
-    # 2. Gemini Provider (Google Official)
-    if GEMINI_API_KEY:
-        providers.append(
-            ("Gemini", ["gemini-1.5-flash", "gemini-1.5-pro"])
-        )
-
-    last_error = "Δεν βρέθηκε διαθέσιμο API Key (GROQ_API_KEY ή GEMINI_API_KEY)."
-
-    for provider_name, models in providers:
-        for model_name in models:
+        groq_models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+        for model_name in groq_models:
             try:
-                print(f"Trying provider: {provider_name} | Model: {model_name}...")
-
-                if provider_name == "Groq":
-                    response = await groq_client.chat.completions.create(
-                        model=model_name,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": f"Ιστορικό Συνομιλίας:\n{chat_log}"},
-                        ],
-                        temperature=0.5,
-                        max_tokens=1000,
-                    )
-                    summary = response.choices[0].message.content
-
-                elif provider_name == "Gemini":
-                    model = genai.GenerativeModel(
-                        model_name=model_name,
-                        system_instruction=system_prompt
-                    )
-                    # Χρήση generate_content_async για να μην μπλοκάρει το event loop
-                    response = await model.generate_content_async(
-                        f"Ιστορικό Συνομιλίας:\n{chat_log}"
-                    )
-                    summary = response.text
-
+                print(f"[Groq] Δοκιμή με μοντέλο: {model_name}...")
+                response = await groq_client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": f"Ιστορικό Συνομιλίας:\n{chat_log}"},
+                    ],
+                    temperature=0.5,
+                    max_tokens=1000,
+                )
+                summary = response.choices[0].message.content
                 if summary and summary.strip():
-                    print(f"Success with {provider_name} ({model_name})!")
+                    print(f"[Groq] Επιτυχία με το {model_name}!")
                     return summary
-
             except Exception as e:
-                last_error = f"{provider_name} ({model_name}): {e}"
-                print(f"Failed {provider_name} ({model_name}) -> {e}")
+                last_error = f"Groq ({model_name}): {e}"
+                print(f"[Groq ERROR] {last_error}")
 
-    raise RuntimeError(f"Όλα τα AI APIs απέτυχαν. Τελευταίο σφάλμα: {last_error}")
+    # ---------------------------------------------------------
+    # 2. ΔΟΚΙΜΗ ΜΕ GEMINI (Νέο SDK - google-genai)
+    # ---------------------------------------------------------
+    if gemini_client:
+        # Τα σύγχρονα/ενεργά μοντέλα της Google
+        gemini_models = ["gemini-2.5-flash", "gemini-2.0-flash"]
+        full_prompt = f"{system_prompt}\n\nΙστορικό Συνομιλίας:\n{chat_log}"
+
+        for model_name in gemini_models:
+            try:
+                print(f"[Gemini] Δοκιμή με μοντέλο: {model_name}...")
+                response = await gemini_client.aio.models.generate_content(
+                    model=model_name,
+                    contents=full_prompt,
+                )
+                summary = response.text
+                if summary and summary.strip():
+                    print(f"[Gemini] Επιτυχία με το {model_name}!")
+                    return summary
+            except Exception as e:
+                last_error = f"Gemini ({model_name}): {e}"
+                print(f"[Gemini ERROR] {last_error}")
+
+    raise RuntimeError(f"Όλα τα AI APIs απέτυχαν. Τελευταίο καταγεγραμμένο σφάλμα: {last_error}")
 
 
 @bot.tree.command(
