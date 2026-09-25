@@ -1,11 +1,11 @@
-import asyncio
 import os
 import time
-from datetime import datetime, time as dt_time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
+
 import aiohttp
 from google import genai
 from groq import AsyncGroq
@@ -22,26 +22,25 @@ gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
 
+bot = commands.Bot(command_prefix="!", intents=intents)
 GUILD_ID = None
+
 COOLDOWN_SECONDS = 1800
 last_used = {}
 
-SCHEDULED_TIMES = [
-    dt_time(hour=10, minute=0, tzinfo=timezone.utc),
-    dt_time(hour=18, minute=0, tzinfo=timezone.utc),
-]
 
 def fit_to_discord_limit(header: str, text: str, max_limit: int = 1980) -> str:
     """Διασφαλίζει ότι το συνολικό μήνυμα δεν ξεπερνά ποτέ το όριο του Discord (2000 chars)."""
     full_text = header + text
     if len(full_text) <= max_limit:
         return full_text
+
     cutoff_note = "\n\n*(Η σύνοψη κόπηκε λόγω ορίου χαρακτήρων)*"
     allowed_text_len = max_limit - len(header) - len(cutoff_note)
     trimmed_text = text[:allowed_text_len]
     return header + trimmed_text + cutoff_note
+
 
 @bot.event
 async def on_ready():
@@ -50,40 +49,67 @@ async def on_ready():
         if GUILD_ID:
             bot.tree.copy_global_to(guild=GUILD_ID)
             synced = await bot.tree.sync(guild=GUILD_ID)
+            print(f"Synced {len(synced)} command(s) to Guild {GUILD_ID.id}")
         else:
             synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} command(s)")
+            print(f"Synced {len(synced)} command(s) globally.")
     except Exception as e:
         print(f"Sync error: {e}")
+
     if not auto_tldr_task.is_running():
         auto_tldr_task.start()
+
+
+async def get_active_groq_models() -> list[str]:
+    if not groq_client:
+        return []
+    try:
+        models_page = await groq_client.models.list()
+        active_models = [m.id for m in models_page.data if m.active]
+        if active_models:
+            return active_models
+    except Exception as e:
+        print(f"[Groq ListModels Error] {e}")
+    return ["llama-3.5-70b-versatile", "llama-3.3-70b-specdec", "llama3-70b-8192"]
+
+
+async def get_active_gemini_models() -> list[str]:
+    if not gemini_client:
+        return []
+    try:
+        models_list = []
+        async for m in gemini_client.aio.models.list():
+            model_id = m.name.replace("models/", "")
+            if "flash" in model_id or "generateContent" in getattr(m, "supported_generation_methods", []):
+                models_list.append(model_id)
+        if models_list:
+            return models_list
+    except Exception as e:
+        print(f"[Gemini ListModels Error] {e}")
+    return ["gemini-3.8-flash", "gemini-2.5-flash"]
+
 
 async def call_gemini_rest_fallback(prompt: str, model_name: str) -> str:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
+
     async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload, timeout=45) as resp:
+        async with session.post(url, json=payload, timeout=30) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 return data["candidates"][0]["content"]["parts"][0]["text"]
             else:
                 err_text = await resp.text()
-                raise RuntimeError(f"HTTP {resp.status} ({model_name}): {err_text[:300]}")
+                raise RuntimeError(f"HTTP {resp.status} ({model_name}): {err_text}")
+
 
 async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> str:
     errors = []
     full_prompt = f"{system_prompt}\n\nΙστορικό Συνομιλίας:\n{chat_log}"
 
-    # === 1. GROQ - Μόνο αξιόπιστα chat μοντέλα ===
+    # 1. GROQ SDK
     if groq_client:
-        # Σκληρά hardcoded τα καλύτερα διαθέσιμα μοντέλα (αποφεύγουμε το dynamic list)
-        groq_models = [
-            "llama-3.3-70b-versatile",
-            "llama-3.1-70b-versatile",
-            "llama-3.1-8b-instant",
-            "gemma2-9b-it",
-            "mixtral-8x7b-32768",
-        ]
+        groq_models = await get_active_groq_models()
         for model_name in groq_models:
             try:
                 response = await groq_client.chat.completions.create(
@@ -92,21 +118,18 @@ async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> s
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": f"Ιστορικό Συνομιλίας:\n{chat_log}"},
                     ],
-                    temperature=0.4,
-                    max_tokens=900,
+                    temperature=0.5,
+                    max_tokens=1000,
                 )
                 summary = response.choices[0].message.content
                 if summary and summary.strip():
-                    print(f"[SUCCESS] Groq model used: {model_name}")
                     return summary
             except Exception as e:
-                error_msg = str(e)[:200]
-                errors.append(f"Groq ({model_name}): {error_msg}")
-                print(f"[Groq Fail] {model_name}: {error_msg}")
+                errors.append(f"Groq ({model_name}): {e}")
 
-    # === 2. GEMINI SDK ===
+    # 2. GEMINI SDK
     if gemini_client:
-        gemini_models = ["gemini-3.8-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+        gemini_models = await get_active_gemini_models()
         for model_name in gemini_models:
             try:
                 response = await gemini_client.aio.models.generate_content(
@@ -115,112 +138,74 @@ async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> s
                 )
                 summary = response.text
                 if summary and summary.strip():
-                    print(f"[SUCCESS] Gemini SDK model used: {model_name}")
                     return summary
             except Exception as e:
-                error_msg = str(e)[:200]
-                errors.append(f"Gemini SDK ({model_name}): {error_msg}")
-                print(f"[Gemini SDK Fail] {model_name}: {error_msg}")
+                errors.append(f"Gemini SDK ({model_name}): {e}")
 
-    # === 3. GEMINI REST FALLBACK ===
+    # 3. GEMINI REST FALLBACK
     if GEMINI_API_KEY:
-        for model_name in ["gemini-3.8-flash", "gemini-2.0-flash"]:
+        for model_name in ["gemini-3.8-flash", "gemini-2.5-flash"]:
             try:
                 summary = await call_gemini_rest_fallback(full_prompt, model_name)
                 if summary and summary.strip():
-                    print(f"[SUCCESS] Gemini REST model used: {model_name}")
                     return summary
             except Exception as e:
-                error_msg = str(e)[:200]
-                errors.append(f"Gemini REST ({model_name}): {error_msg}")
-                print(f"[Gemini REST Fail] {model_name}: {error_msg}")
+                errors.append(f"Gemini REST ({model_name}): {e}")
 
-    # Αν φτάσουμε εδώ, όλα απέτυχαν
-    short_errors = "\n• ".join(errors[:6])  # κρατάμε μόνο τα πρώτα 6 errors
-    raise RuntimeError(f"Αποτυχία όλων των APIs:\n• {short_errors}")
+    all_errors_str = "\n• ".join(errors)
+    raise RuntimeError(f"Αποτυχία όλων των APIs:\n• {all_errors_str}")
+
 
 async def fetch_and_generate_tldr(channel: discord.TextChannel, hours: int) -> str | None:
-    now = datetime.now(timezone.utc)
-    target_cutoff = now - timedelta(hours=hours)
-    context_hours = max(18, hours * 2)
-    context_cutoff = now - timedelta(hours=context_hours)
+    cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
+    messages_list = []
 
-    target_messages = []
-    context_messages = []
-    total_fetched = 0
-
-    async for message in channel.history(limit=600):
-        total_fetched += 1
-
-        if message.created_at < context_cutoff:
-            break
-
+    async for message in channel.history(after=cutoff_time, limit=500):
         if message.author.bot or not message.content.strip():
             continue
 
-        # Κόβουμε πολύ μεγάλα μηνύματα
-        content = message.content.strip()
-        if len(content) > 400:
-            content = content[:400] + "..."
-
         timestamp = message.created_at.strftime("%H:%M")
-        formatted_msg = f"[{timestamp}] {message.author.display_name}: {content}"
+        messages_list.append(
+            f"[{timestamp}] {message.author.display_name}: {message.content}"
+        )
 
-        if message.created_at >= target_cutoff:
-            target_messages.append(formatted_msg)
-        else:
-            context_messages.append(formatted_msg)
-
-    print(f"[TLDR Debug] Channel: {channel.name} | Fetched: {total_fetched} | Target: {len(target_messages)} | Context: {len(context_messages)}")
-
-    if not target_messages:
+    if not messages_list:
         return None
 
-    # Αντιστρέφουμε (παλιό → νέο)
-    target_messages.reverse()
-    context_messages.reverse()
-
-    # Πολύ πιο επιθετικό trimming για να μην σκάνε τα APIs
-    context_log = "\n".join(context_messages)
-    if len(context_log) > 3500:
-        context_log = context_log[-3500:]
-
-    target_log = "\n".join(target_messages)
-    if len(target_log) > 5500:
-        target_log = target_log[-5500:]
+    chat_log = "\n".join(messages_list)
+    if len(chat_log) > 15000:
+        chat_log = chat_log[-15000:]
 
     system_prompt = (
-        "Είσαι ένας γραμματέας Discord. Διαβάζεις συνομιλίες (Ελληνικά, Greeklish, Αγγλικά) "
-        "και φτιάχνεις δομημένη, καθαρή σύνοψη (TL;DR) στα Ελληνικά.\n\n"
-        "Οδηγίες:\n"
-        "1. Χώρισε σε θεματικές ενότητες με έντονα γράμματα.\n"
-        "2. Χρησιμοποίησε bullet points όπου βοηθάει.\n"
-        "3. Σημείωσε σημαντικές αποφάσεις στο τέλος.\n"
-        "4. ΜΗΝ βάζεις links από εικόνες/gifs/media.\n"
-        "5. ΚΡΑΤΑ ΤΗ ΣΥΝΟΨΗ ΣΥΝΤΟΜΗ (κάτω από 220 λέξεις).\n"
-        "6. Μόνο τι ειπώθηκε – χωρίς δικά σου συμπεράσματα.\n"
-        "7. Ουδέτερος και αντικειμενικός.\n"
-        "8. Απαντάς ΜΟΝΟ στα Ελληνικά."
+        "Είσαι ένας γραμματέας Discord. Η δουλειά σου είναι να διαβάζεις"
+        " συνομιλίες (που περιέχουν Ελληνικά, Greeklish και Αγγλικά) και να"
+        " φτιάχνεις μια δομημένη, καθαρή και ξεκάθαρη σύνοψη (TL;DR) στα Ελληνικά.\n\n"
+        "Οδηγίες Δομής:\n"
+        "1. Χώρισε τη σύνοψη σε θεματικές ενότητες (με έντονα γράμματα) για τα κύρια θέματα συζήτησης.\n"
+        "2. Χώρισε το κείμενο σε σύντομες παραγράφους ή bullet points για καλύτερη αναγνωσιμότητα αν χρειάζεται.\n"
+        "3. Αν υπήρξαν σημαντικές αποφάσεις, σημείωσέ τες στο τέλος.\n"
+        "4. ΜΗΝ περιλαμβάνεις συνδέσμους (links) από εικόνες, gifs ή media.\n"
+        "5. ΚΡΑΤΑ ΤΗ ΣΥΝΟΨΗ ΣΥΝΤΟΜΗ (κάτω από 250-280 λέξεις συνολικά).\n"
+        "6. Σύνοψισε μόνο τι ειπώθηκε και τι συνέβη στο chat, χωρίς να βγάζεις δικά σου συμπεράσματα, κρίσεις ή ερμηνείες.\n"
+        "7. Μείνε όσο πιο ουδέτερος και αντικειμενικός γίνεται.\n"
+        "8. Απαντάς ΜΟΝΟ στα Ελληνικά.\n"
+        
     )
 
-    full_chat_payload = (
-        f"--- ΠΡΟΗΓΟΥΜΕΝΟ CONTEXT ---\n"
-        f"{context_log if context_log else 'Δεν υπάρχει προηγούμενο context.'}\n\n"
-        f"--- ΜΗΝΥΜΑΤΑ ΠΡΟΣ ΣΥΝΟΨΗ (τελευταίες {hours} ώρες) ---\n"
-        f"{target_log}"
-    )
+    return await generate_summary_with_fallback(system_prompt, chat_log)
 
-    return await generate_summary_with_fallback(system_prompt, full_chat_payload)
 
-@tasks.loop(time=SCHEDULED_TIMES)
+@tasks.loop(hours=8)
 async def auto_tldr_task():
     if not AUTO_TLDR_CHANNEL_ID:
         return
+
     try:
         channel_id = int(AUTO_TLDR_CHANNEL_ID)
         channel = bot.get_channel(channel_id)
         if not channel:
             channel = await bot.fetch_channel(channel_id)
+
         if isinstance(channel, discord.TextChannel):
             summary = await fetch_and_generate_tldr(channel, hours=8)
             if summary:
@@ -230,9 +215,11 @@ async def auto_tldr_task():
     except Exception as e:
         print(f"[Auto TLDR Error] {e}")
 
+
 @auto_tldr_task.before_loop
 async def before_auto_tldr():
     await bot.wait_until_ready()
+
 
 @bot.tree.command(
     name="tldr",
@@ -266,6 +253,7 @@ async def tldr(interaction: discord.Interaction, hours: int):
         channel = interaction.channel
         if isinstance(channel, discord.TextChannel):
             summary = await fetch_and_generate_tldr(channel, hours=hours)
+
             if not summary:
                 await interaction.followup.send(
                     f"Δεν βρέθηκαν νέα μηνύματα τις τελευταίες {hours} ώρες."
@@ -275,18 +263,17 @@ async def tldr(interaction: discord.Interaction, hours: int):
             last_used[channel_id] = time.time()
             header = f"**TL;DR Τελευταίων {hours} Ωρών** 📝\n\n"
             final_msg = fit_to_discord_limit(header, summary)
+
             await interaction.followup.send(final_msg)
         else:
             await interaction.followup.send("Αυτή η εντολή υποστηρίζεται μόνο σε κείμενα καναλιών.")
+
     except Exception as e:
-        print(f"[TLDR Error] {e}")
-        # Στέλνουμε σύντομο μήνυμα για να μην σκάσει το Discord
-        error_text = str(e)
-        if len(error_text) > 1500:
-            error_text = error_text[:1500] + "..."
+        print(f"Fallback Chain Exhausted: {e}")
         await interaction.followup.send(
-            f"Υπήρξε πρόβλημα με τις υπηρεσίες AI:\n```{error_text}```"
+            f"Υπήρξε πρόβλημα με τις υπηρεσίες AI: `{e}`"
         )
+
 
 @bot.tree.command(
     name="cooldown",
@@ -310,5 +297,6 @@ async def cooldown_status(interaction: discord.Interaction):
         "✅ Το `/tldr` είναι **έτοιμο για χρήση** στο κανάλι!",
         ephemeral=True,
     )
+
 
 bot.run(DISCORD_TOKEN)
