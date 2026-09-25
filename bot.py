@@ -1,3 +1,4 @@
+import asyncio
 import os
 from datetime import datetime, timedelta, timezone
 import discord
@@ -6,41 +7,32 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from google import genai
 
-# Φόρτωση μεταβλητών περιβάλλοντος (για τοπική ανάπτυξη)
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Έλεγχος αν υπάρχουν τα απαραίτητα API Keys
-if not DISCORD_TOKEN:
-    print("CRITICAL ERROR: Το DISCORD_TOKEN δεν βρέθηκε στις μεταβλητές περιβάλλοντος!")
-if not GEMINI_API_KEY:
-    print("CRITICAL ERROR: Το GEMINI_API_KEY δεν βρέθηκε στις μεταβλητές περιβάλλοντος!")
+if not DISCORD_TOKEN or not GEMINI_API_KEY:
+    print("CRITICAL ERROR: Λείπουν τα API Keys!")
 
-# Αρχικοποίηση Gemini Client
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Intents για το Discord Bot
 intents = discord.Intents.default()
-intents.message_content = True  # Απαραίτητο για την ανάγνωση περιεχομένου μηνυμάτων
+intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Προαιρετικό: Βάλε το ID του Server σου για ΑΜΕΣΟ sync των εντολών.
-# (Αν το αφήσεις None, θα κάνει μόνο Global sync που μπορεί να καθυστερήσει έως 1 ώρα)
-GUILD_ID = None  # Π.χ. discord.Object(id=123456789012345678)
+GUILD_ID = None  # Βάλε discord.Object(id=...) αν θέλεις άμεσο sync
 
 
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user.name} (ID: {bot.user.id})")
-    
     try:
         if GUILD_ID:
             bot.tree.copy_global_to(guild=GUILD_ID)
             synced = await bot.tree.sync(guild=GUILD_ID)
-            print(f"Synced {len(synced)} command(s) directly to Guild ID {GUILD_ID.id}")
+            print(f"Synced {len(synced)} command(s) to Guild {GUILD_ID.id}")
         else:
             synced = await bot.tree.sync()
             print(f"Synced {len(synced)} command(s) globally.")
@@ -54,24 +46,23 @@ async def on_ready():
 )
 @app_commands.describe(hours="Πόσες ώρες πίσω να ανατρέξει το bot (1 έως 72)")
 async def tldr(interaction: discord.Interaction, hours: int):
-    # Ενημέρωση του Discord ότι η επεξεργασία ξεκίνησε
     await interaction.response.defer(thinking=True)
 
-    # Έλεγχος ορίων ωρών
     if hours <= 0 or hours > 72:
-        await interaction.followup.send("Παρακαλώ δώσε έναν αριθμό ωρών μεταξύ 1 και 72.")
+        await interaction.followup.send(
+            "Παρακαλώ δώσε έναν αριθμό ωρών μεταξύ 1 και 72."
+        )
         return
 
-    # Υπολογισμός χρονικού ορίου
     cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
     messages_list = []
 
-    # Ανάγνωση ιστορικού μηνυμάτων
-    async for message in interaction.channel.history(after=cutoff_time, limit=500):
-        # Αγνοούμε bots και κενά μηνύματα
+    async for message in interaction.channel.history(
+        after=cutoff_time, limit=500
+    ):
         if message.author.bot or not message.content.strip():
             continue
-        
+
         timestamp = message.created_at.strftime("%H:%M")
         messages_list.append(
             f"[{timestamp}] {message.author.display_name}: {message.content}"
@@ -83,14 +74,11 @@ async def tldr(interaction: discord.Interaction, hours: int):
         )
         return
 
-    # Σύνταξη του κειμένου συνομιλίας
     chat_log = "\n".join(messages_list)
-    
-    # Προστασία μεγέθους κειμένου αν υπάρχουν πάρα πολλά μηνύματα
+
     if len(chat_log) > 15000:
         chat_log = chat_log[-15000:]
 
-    # Prompt για το Gemini
     prompt = f"""
 Είσαι ένας βοηθός Discord bot. Παρακάτω είναι μια συνομιλία από ένα Discord κανάλι που περιέχει Ελληνικά, Greeklish και Αγγλικά.
 
@@ -106,30 +94,45 @@ async def tldr(interaction: discord.Interaction, hours: int):
 {chat_log}
 """
 
-    try:
-        # Κλήση του Gemini API με το σωστό μοντέλο
-        response = ai_client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=prompt,
-        )
-        summary = response.text
+    # Λίστα με διαθέσιμα μοντέλα κατά σειρά προτίμησης
+    candidate_models = ["gemini-2.5-flash", "gemini-1.5-flash"]
 
-        # Διαχείριση ορίου 2000 χαρακτήρων του Discord
-        header = f"**TL;DR Τελευταίων {hours} Ωρών** 📝\n\n"
-        if len(header + summary) > 2000:
-            summary = (
-                summary[: 1900 - len(header)]
-                + "...\n*(Η σύνοψη κόπηκε λόγω ορίου χαρακτήρων)*"
+    summary = None
+    last_error = None
+
+    for model_name in candidate_models:
+        try:
+            # Δοκιμή κλήσης στο μοντέλο
+            response = ai_client.models.generate_content(
+                model=model_name,
+                contents=prompt,
             )
+            summary = response.text
+            if summary:
+                break  # Αν πετύχει, βγαίνουμε από το loop
+        except Exception as e:
+            last_error = e
+            print(
+                f"Model {model_name} failed with error: {e}. Trying next"
+                " model..."
+            )
+            await asyncio.sleep(1)  # Μικρή αναμονή πριν τη επόμενη δοκιμή
 
-        await interaction.followup.send(header + summary)
-
-    except Exception as e:
-        print(f"DETAILED GEMINI ERROR: {type(e).__name__}: {e}")
+    if not summary:
         await interaction.followup.send(
-            f"Υπήρξε σφάλμα κατά τη επικοινωνία με το AI API: `{e}`"
+            "Το API της Google είναι προσωρινά υπερφορτωμένο (503 High Demand)."
+            " Παρακαλώ δοκίμασε ξανά σε 1-2 λεπτά."
+        )
+        return
+
+    header = f"**TL;DR Τελευταίων {hours} Ωρών** 📝\n\n"
+    if len(header + summary) > 2000:
+        summary = (
+            summary[: 1900 - len(header)]
+            + "...\n*(Η σύνοψη κόπηκε λόγω ορίου χαρακτήρων)*"
         )
 
+    await interaction.followup.send(header + summary)
 
-# Εκκίνηση του Bot
+
 bot.run(DISCORD_TOKEN)
