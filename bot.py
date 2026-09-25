@@ -171,7 +171,12 @@ async def fetch_and_generate_tldr(channel: discord.TextChannel, hours: int) -> s
     cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
     messages_list = []
 
-    async for message in channel.history(after=cutoff_time, limit=500):
+    # Διαβάζουμε ΑΠΟ ΤΟ ΠΙΟ ΠΡΟΣΦΑΤΟ ΠΡΟΣ ΤΑ ΠΙΣΩ (oldest_first=False).
+    # Έτσι, αν υπάρχουν περισσότερα από `limit` μηνύματα στο χρονικό
+    # παράθυρο, αυτά που κόβονται είναι τα παλιότερα -- όχι τα πιο πρόσφατα.
+    # Με after=... και την προεπιλεγμένη σειρά (oldest_first) θα γέμιζε το
+    # όριο με τα παλιότερα μηνύματα και θα σταματούσε πριν φτάσει στο τώρα.
+    async for message in channel.history(after=cutoff_time, limit=500, oldest_first=False):
         if message.author.bot or not message.content.strip():
             continue
 
@@ -182,6 +187,9 @@ async def fetch_and_generate_tldr(channel: discord.TextChannel, hours: int) -> s
 
     if not messages_list:
         return None
+
+    # Τα γυρίζουμε σε χρονολογική σειρά (παλιό -> νέο) πριν φτιάξουμε το log.
+    messages_list.reverse()
 
     chat_log = "\n".join(messages_list)
     if len(chat_log) > 15000:
