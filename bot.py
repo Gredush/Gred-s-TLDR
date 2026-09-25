@@ -53,7 +53,6 @@ async def get_active_groq_models() -> list[str]:
             return active_models
     except Exception as e:
         print(f"[Groq ListModels Error] {e}")
-    # Hardcoded fallbacks αν αποτύχει η δυναμική λίστα
     return ["llama-3.5-70b-versatile", "llama-3.3-70b-specdec", "llama3-70b-8192"]
 
 
@@ -94,9 +93,7 @@ async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> s
     errors = []
     full_prompt = f"{system_prompt}\n\nΙστορικό Συνομιλίας:\n{chat_log}"
 
-    # ---------------------------------------------------------
-    # 1. GROQ SDK (Δυναμική λίστα μοντέλων)
-    # ---------------------------------------------------------
+    # 1. GROQ SDK
     if groq_client:
         groq_models = await get_active_groq_models()
         for model_name in groq_models:
@@ -122,9 +119,7 @@ async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> s
     else:
         errors.append("Groq: Το GROQ_API_KEY δεν είναι ορισμένο.")
 
-    # ---------------------------------------------------------
-    # 2. GEMINI SDK (Δυναμική λίστα μοντέλων)
-    # ---------------------------------------------------------
+    # 2. GEMINI SDK
     if gemini_client:
         gemini_models = await get_active_gemini_models()
         for model_name in gemini_models:
@@ -145,9 +140,7 @@ async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> s
     else:
         errors.append("Gemini: Το GEMINI_API_KEY δεν είναι ορισμένο.")
 
-    # ---------------------------------------------------------
-    # 3. GEMINI REST API FALLBACK (Με gemini-3.8-flash)
-    # ---------------------------------------------------------
+    # 3. GEMINI REST FALLBACK
     if GEMINI_API_KEY:
         for model_name in ["gemini-3.8-flash", "gemini-2.5-flash"]:
             try:
@@ -170,6 +163,11 @@ async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> s
     description="Δημιουργεί σύνοψη (TL;DR) των μηνυμάτων του καναλιού.",
 )
 @app_commands.describe(hours="Πόσες ώρες πίσω να ανατρέξει το bot (1 έως 72)")
+# ---------------------------------------------------------
+# COOLDOWN: 1 χρήση ανά 1800 δευτερόλεπτα (30 λεπτά) ανά κανάλι (Channel)
+# Αν θέλεις να είναι ανά χρήστη, άλλαξε το BucketType.channel σε BucketType.user
+# ---------------------------------------------------------
+@app_commands.checks.cooldown(1, 1800.0, key=lambda i: app_commands.Cooldown.type_target(app_commands.BucketType.channel)(i))
 async def tldr(interaction: discord.Interaction, hours: int):
     await interaction.response.defer(thinking=True)
 
@@ -229,6 +227,25 @@ async def tldr(interaction: discord.Interaction, hours: int):
         await interaction.followup.send(
             f"Υπήρξε πρόβλημα με τις υπηρεσίες AI: `{e}`"
         )
+
+
+# ---------------------------------------------------------
+# HANDLER ΓΙΑ ΤΟ COOLDOWN ERROR
+# ---------------------------------------------------------
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.CommandOnCooldown):
+        minutes = int(error.retry_after // 60)
+        seconds = int(error.retry_after % 60)
+        
+        msg = f"⏳ Η εντολή είναι σε cooldown! Παρακαλώ περίμενε ακόμα **{minutes} λ.** και **{seconds} δευτ.** πριν την ξαναχρησιμοποιήσεις."
+        
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    else:
+        print(f"[Command Error] {error}")
 
 
 bot.run(DISCORD_TOKEN)
