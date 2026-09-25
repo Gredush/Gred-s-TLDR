@@ -43,21 +43,29 @@ async def on_ready():
 
 async def call_gemini_rest_fallback(prompt: str) -> str:
     """
-    Direct REST HTTP Call στο Gemini API (χωρίς εξάρτηση από SDKs).
+    Direct REST HTTP Call στο Gemini API χρησιμοποιώντας το ενεργό gemini-3.8-flash.
     """
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}]
-    }
+    # Ενημερωμένο μοντέλο σε gemini-3.8-flash
+    models_to_try = ["gemini-3.8-flash", "gemini-1.5-flash"]
     
     async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload, timeout=30) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return data['candidates'][0]['content']['parts'][0]['text']
-            else:
-                err_text = await resp.text()
-                raise RuntimeError(f"Gemini REST HTTP Error {resp.status}: {err_text}")
+        for model in models_to_try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}]
+            }
+            try:
+                async with session.post(url, json=payload, timeout=30) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data['candidates'][0]['content']['parts'][0]['text']
+                    else:
+                        err_text = await resp.text()
+                        print(f"[Gemini REST Warning] {model} returned {resp.status}: {err_text}")
+            except Exception as e:
+                print(f"[Gemini REST Exception] {model}: {e}")
+                
+    raise RuntimeError("Όλα τα Gemini REST endpoints επέστρεψαν σφάλμα.")
 
 
 async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> str:
@@ -65,7 +73,7 @@ async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> s
     full_prompt = f"{system_prompt}\n\nΙστορικό Συνομιλίας:\n{chat_log}"
 
     # ---------------------------------------------------------
-    # 1. GROQ SDK (llama-3.3-70b-versatile, llama-3.1-8b-instant)
+    # 1. GROQ SDK
     # ---------------------------------------------------------
     if groq_client:
         groq_models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
@@ -90,10 +98,10 @@ async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> s
                 print(f"[Groq SDK ERROR] {last_error}")
 
     # ---------------------------------------------------------
-    # 2. GEMINI SDK (google.genai - gemini-2.5-flash)
+    # 2. GEMINI SDK (gemini-3.8-flash)
     # ---------------------------------------------------------
     if gemini_client:
-        gemini_models = ["gemini-2.5-flash", "gemini-1.5-flash"]
+        gemini_models = ["gemini-3.8-flash", "gemini-1.5-flash"]
         for model_name in gemini_models:
             try:
                 print(f"[Gemini SDK] Δοκιμή με {model_name}...")
@@ -110,7 +118,7 @@ async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> s
                 print(f"[Gemini SDK ERROR] {last_error}")
 
     # ---------------------------------------------------------
-    # 3. GEMINI REST API FALLBACK (Απευθείας HTTP Call)
+    # 3. GEMINI REST API FALLBACK
     # ---------------------------------------------------------
     if GEMINI_API_KEY:
         try:
@@ -124,7 +132,6 @@ async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> s
             print(f"[Gemini REST ERROR] {last_error}")
 
     raise RuntimeError(f"Όλα τα AI APIs απέτυχαν. Τελευταίο καταγεγραμμένο σφάλμα: {last_error}")
-
 
 @bot.tree.command(
     name="tldr",
