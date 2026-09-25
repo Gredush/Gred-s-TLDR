@@ -1,4 +1,3 @@
-import asyncio
 import os
 from datetime import datetime, timedelta, timezone
 import discord
@@ -15,6 +14,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not DISCORD_TOKEN or not GEMINI_API_KEY:
     print("CRITICAL ERROR: Λείπουν τα API Keys!")
 
+# Αρχικοποίηση Gemini Client
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 intents = discord.Intents.default()
@@ -22,7 +22,8 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-GUILD_ID = None  # Βάλε discord.Object(id=...) αν θέλεις άμεσο sync
+# Βάλε το ID του server σου αν θέλεις ακαριαίο sync (π.χ. discord.Object(id=123456789))
+GUILD_ID = None
 
 
 @bot.event
@@ -94,34 +95,30 @@ async def tldr(interaction: discord.Interaction, hours: int):
 {chat_log}
 """
 
-    # Λίστα με διαθέσιμα μοντέλα κατά σειρά προτίμησης
-    candidate_models = ["gemini-2.5-flash", "gemini-1.5-flash"]
+    # Λίστα με τα επίσημα μοντέλα
+    candidate_models = ["gemini-2.0-flash", "gemini-1.5-flash"]
 
     summary = None
     last_error = None
 
     for model_name in candidate_models:
         try:
-            # Δοκιμή κλήσης στο μοντέλο
-            response = ai_client.models.generate_content(
+            # Async κλήση (ai_client.aio) για να μην παγώνει το bot
+            response = await ai_client.aio.models.generate_content(
                 model=model_name,
                 contents=prompt,
             )
             summary = response.text
             if summary:
-                break  # Αν πετύχει, βγαίνουμε από το loop
+                break
         except Exception as e:
             last_error = e
-            print(
-                f"Model {model_name} failed with error: {e}. Trying next"
-                " model..."
-            )
-            await asyncio.sleep(1)  # Μικρή αναμονή πριν τη επόμενη δοκιμή
+            print(f"Model {model_name} failed: {type(e).__name__} - {e}")
 
     if not summary:
+        print(f"ALL MODELS FAILED. Last error: {last_error}")
         await interaction.followup.send(
-            "Το API της Google είναι προσωρινά υπερφορτωμένο (503 High Demand)."
-            " Παρακαλώ δοκίμασε ξανά σε 1-2 λεπτά."
+            f"Σφάλμα επικοινωνίας με το API: `{last_error}`"
         )
         return
 
