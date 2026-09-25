@@ -6,7 +6,6 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
-
 import aiohttp
 from google import genai
 from groq import AsyncGroq
@@ -23,10 +22,9 @@ gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 intents = discord.Intents.default()
 intents.message_content = True
-
 bot = commands.Bot(command_prefix="!", intents=intents)
-GUILD_ID = None
 
+GUILD_ID = None
 COOLDOWN_SECONDS = 1800
 last_used = {}
 
@@ -38,18 +36,15 @@ SCHEDULED_TIMES = [
     dt_time(hour=18, minute=0, tzinfo=timezone.utc),
 ]
 
-
 def fit_to_discord_limit(header: str, text: str, max_limit: int = 1980) -> str:
     """Διασφαλίζει ότι το συνολικό μήνυμα δεν ξεπερνά ποτέ το όριο του Discord (2000 chars)."""
     full_text = header + text
     if len(full_text) <= max_limit:
         return full_text
-
     cutoff_note = "\n\n*(Η σύνοψη κόπηκε λόγω ορίου χαρακτήρων)*"
     allowed_text_len = max_limit - len(header) - len(cutoff_note)
     trimmed_text = text[:allowed_text_len]
     return header + trimmed_text + cutoff_note
-
 
 @bot.event
 async def on_ready():
@@ -60,12 +55,11 @@ async def on_ready():
             synced = await bot.tree.sync(guild=GUILD_ID)
         else:
             synced = await bot.tree.sync()
+        print(f"Synced {len(synced)} command(s)")
     except Exception as e:
         print(f"Sync error: {e}")
-
     if not auto_tldr_task.is_running():
         auto_tldr_task.start()
-
 
 async def get_active_groq_models() -> list[str]:
     if not groq_client:
@@ -78,7 +72,6 @@ async def get_active_groq_models() -> list[str]:
     except Exception as e:
         print(f"[Groq ListModels Error] {e}")
     return ["llama-3.5-70b-versatile", "llama-3.3-70b-specdec", "llama3-70b-8192"]
-
 
 async def get_active_gemini_models() -> list[str]:
     if not gemini_client:
@@ -93,13 +86,11 @@ async def get_active_gemini_models() -> list[str]:
             return models_list
     except Exception as e:
         print(f"[Gemini ListModels Error] {e}")
-    return ["gemini-3.8-flash", "gemini-2.5-flash"]
-
+    return ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.5-flash"]
 
 async def call_gemini_rest_fallback(prompt: str, model_name: str) -> str:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
-
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json=payload, timeout=30) as resp:
             if resp.status == 200:
@@ -108,7 +99,6 @@ async def call_gemini_rest_fallback(prompt: str, model_name: str) -> str:
             else:
                 err_text = await resp.text()
                 raise RuntimeError(f"HTTP {resp.status} ({model_name}): {err_text}")
-
 
 async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> str:
     errors = []
@@ -151,7 +141,7 @@ async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> s
 
     # 3. GEMINI REST FALLBACK
     if GEMINI_API_KEY:
-        for model_name in ["gemini-3.8-flash", "gemini-2.5-flash"]:
+        for model_name in ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.5-flash"]:
             try:
                 summary = await call_gemini_rest_fallback(full_prompt, model_name)
                 if summary and summary.strip():
@@ -162,18 +152,24 @@ async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> s
     all_errors_str = "\n• ".join(errors)
     raise RuntimeError(f"Αποτυχία όλων των APIs:\n• {all_errors_str}")
 
-
 async def fetch_and_generate_tldr(channel: discord.TextChannel, hours: int) -> str | None:
     now = datetime.now(timezone.utc)
-    
     target_cutoff = now - timedelta(hours=hours)
     context_hours = max(24, hours * 2)
     context_cutoff = now - timedelta(hours=context_hours)
 
     target_messages = []
     context_messages = []
+    total_fetched = 0
 
-    async for message in channel.history(after=context_cutoff, limit=600):
+    # Παίρνουμε τα πιο πρόσφατα μηνύματα (χωρίς after στην αρχή για να είμαστε σίγουροι)
+    async for message in channel.history(limit=800):
+        total_fetched += 1
+
+        # Σταματάμε όταν φτάσουμε πολύ πίσω
+        if message.created_at < context_cutoff:
+            break
+
         if message.author.bot or not message.content.strip():
             continue
 
@@ -185,8 +181,16 @@ async def fetch_and_generate_tldr(channel: discord.TextChannel, hours: int) -> s
         else:
             context_messages.append(formatted_msg)
 
+    # Debug prints (θα φαίνονται στο terminal του bot)
+    print(f"[TLDR Debug] Channel: {channel.name} | Fetched: {total_fetched} | Target msgs: {len(target_messages)} | Context msgs: {len(context_messages)}")
+    print(f"[TLDR Debug] Now: {now} | Target cutoff: {target_cutoff}")
+
     if not target_messages:
         return None
+
+    # Αντιστρέφουμε για να είναι χρονολογικά σωστά (παλιό → νέο)
+    target_messages.reverse()
+    context_messages.reverse()
 
     context_log = "\n".join(context_messages)
     if len(context_log) > 8000:
@@ -220,19 +224,16 @@ async def fetch_and_generate_tldr(channel: discord.TextChannel, hours: int) -> s
 
     return await generate_summary_with_fallback(system_prompt, full_chat_payload)
 
-
 # Εκτέλεση στις προγραμματισμένες ώρες (10:00 & 18:00)
 @tasks.loop(time=SCHEDULED_TIMES)
 async def auto_tldr_task():
     if not AUTO_TLDR_CHANNEL_ID:
         return
-
     try:
         channel_id = int(AUTO_TLDR_CHANNEL_ID)
         channel = bot.get_channel(channel_id)
         if not channel:
             channel = await bot.fetch_channel(channel_id)
-
         if isinstance(channel, discord.TextChannel):
             summary = await fetch_and_generate_tldr(channel, hours=8)
             if summary:
@@ -242,11 +243,9 @@ async def auto_tldr_task():
     except Exception as e:
         print(f"[Auto TLDR Error] {e}")
 
-
 @auto_tldr_task.before_loop
 async def before_auto_tldr():
     await bot.wait_until_ready()
-
 
 @bot.tree.command(
     name="tldr",
@@ -280,7 +279,6 @@ async def tldr(interaction: discord.Interaction, hours: int):
         channel = interaction.channel
         if isinstance(channel, discord.TextChannel):
             summary = await fetch_and_generate_tldr(channel, hours=hours)
-
             if not summary:
                 await interaction.followup.send(
                     f"Δεν βρέθηκαν νέα μηνύματα τις τελευταίες {hours} ώρες."
@@ -290,17 +288,14 @@ async def tldr(interaction: discord.Interaction, hours: int):
             last_used[channel_id] = time.time()
             header = f"**TL;DR Τελευταίων {hours} Ωρών** 📝\n\n"
             final_msg = fit_to_discord_limit(header, summary)
-
             await interaction.followup.send(final_msg)
         else:
             await interaction.followup.send("Αυτή η εντολή υποστηρίζεται μόνο σε κείμενα καναλιών.")
-
     except Exception as e:
         print(f"Fallback Chain Exhausted: {e}")
         await interaction.followup.send(
             f"Υπήρξε πρόβλημα με τις υπηρεσίες AI: `{e}`"
         )
-
 
 @bot.tree.command(
     name="cooldown",
@@ -324,6 +319,5 @@ async def cooldown_status(interaction: discord.Interaction):
         "✅ Το `/tldr` είναι **έτοιμο για χρήση** στο κανάλι!",
         ephemeral=True,
     )
-
 
 bot.run(DISCORD_TOKEN)
