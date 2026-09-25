@@ -178,12 +178,11 @@ async def tldr(interaction: discord.Interaction, hours: int):
     if channel_id in last_used:
         elapsed = now - last_used[channel_id]
         if elapsed < COOLDOWN_SECONDS:
-            remaining = COOLDOWN_SECONDS - elapsed
-            minutes = int(remaining // 60)
-            seconds = int(remaining % 60)
+            available_at_unix = int(last_used[channel_id] + COOLDOWN_SECONDS)
+            # Δημόσια απάντηση στο κανάλι με live αντίστροφη μέτρηση από το Discord
             await interaction.response.send_message(
-                f"⏳ Το `/tldr` είναι σε cooldown! Παρακαλώ περίμενε **{minutes} λ.** και **{seconds} δευτ.** πριν την ξαναχρησιμοποιήσεις.",
-                ephemeral=True,
+                f"⏳ Το `/tldr` είναι σε cooldown για αυτό το κανάλι!\n"
+                f"Θα είναι ξανά διαθέσιμο <t:{available_at_unix}:R> (στις <t:{available_at_unix}:t>)."
             )
             return
 
@@ -261,11 +260,9 @@ async def cooldown_status(interaction: discord.Interaction):
     if channel_id in last_used:
         elapsed = now - last_used[channel_id]
         if elapsed < COOLDOWN_SECONDS:
-            remaining = COOLDOWN_SECONDS - elapsed
-            minutes = int(remaining // 60)
-            seconds = int(remaining % 60)
+            available_at_unix = int(last_used[channel_id] + COOLDOWN_SECONDS)
             await interaction.response.send_message(
-                f"⏱️ Απομένουν **{minutes} λεπτά** και **{seconds} δευτερόλεπτα** μέχρι να μπορέσει να χρησιμοποιηθεί ξανά το `/tldr` στο κανάλι.",
+                f"⏱️ Το `/tldr` θα είναι ξανά διαθέσιμο στο κανάλι <t:{available_at_unix}:R>.",
                 ephemeral=True,
             )
             return
