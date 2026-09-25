@@ -4,23 +4,35 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
+
+# API SDKs
+from google import genai
 from groq import AsyncGroq
+from openai import AsyncOpenAI
 
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
-if not DISCORD_TOKEN or not GROQ_API_KEY:
-    print("CRITICAL ERROR: Λείπουν τα API Keys (DISCORD_TOKEN ή GROQ_API_KEY)!")
-
-groq_client = AsyncGroq(api_key=GROQ_API_KEY)
+# Αρχικοποίηση Clients
+groq_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+openrouter_client = (
+    AsyncOpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=OPENROUTER_API_KEY,
+    )
+    if OPENROUTER_API_KEY
+    else None
+)
 
 intents = discord.Intents.default()
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
-
 GUILD_ID = None
 
 
@@ -37,6 +49,87 @@ async def on_ready():
             print(f"Synced {len(synced)} command(s) globally.")
     except Exception as e:
         print(f"Sync error: {e}")
+
+
+async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> str:
+    """
+    Δοκιμάζει διαδοχικά Providers και Models μέχρι να βρει ένα που απαντάει.
+    """
+    providers = []
+
+    # 1. Groq Provider
+    if groq_client:
+        providers.append(
+            ("Groq", groq_client, ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"])
+        )
+
+    # 2. Gemini Provider
+    if gemini_client:
+        providers.append(
+            ("Gemini", gemini_client, ["gemini-2.0-flash", "gemini-1.5-flash"])
+        )
+
+    # 3. OpenRouter Provider (Free Tier Backup)
+    if openrouter_client:
+        providers.append(
+            (
+                "OpenRouter",
+                openrouter_client,
+                [
+                    "google/gemini-2.0-flash-exp:free",
+                    "meta-llama/llama-3.3-70b-instruct:free",
+                ],
+            )
+        )
+
+    last_error = "Δεν βρέθηκε διαθέσιμο API Key."
+
+    for provider_name, client, models in providers:
+        for model_name in models:
+            try:
+                print(f"Trying provider: {provider_name} | Model: {model_name}...")
+
+                if provider_name == "Groq":
+                    response = await client.chat.completions.create(
+                        model=model_name,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": f"Ιστορικό Συνομιλίας:\n{chat_log}"},
+                        ],
+                        temperature=0.5,
+                        max_tokens=1000,
+                    )
+                    summary = response.choices[0].message.content
+
+                elif provider_name == "Gemini":
+                    full_prompt = f"{system_prompt}\n\nΙστορικό Συνομιλίας:\n{chat_log}"
+                    response = await client.aio.models.generate_content(
+                        model=model_name,
+                        contents=full_prompt,
+                    )
+                    summary = response.text
+
+                elif provider_name == "OpenRouter":
+                    response = await client.chat.completions.create(
+                        model=model_name,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": f"Ιστορικό Συνομιλίας:\n{chat_log}"},
+                        ],
+                        temperature=0.5,
+                        max_tokens=1000,
+                    )
+                    summary = response.choices[0].message.content
+
+                if summary and summary.strip():
+                    print(f"Success with {provider_name} ({model_name})!")
+                    return summary
+
+            except Exception as e:
+                last_error = f"{provider_name} ({model_name}): {e}"
+                print(f"Failed {provider_name} ({model_name}) -> {e}")
+
+    raise RuntimeError(f"Όλα τα AI APIs απέτυχαν. Τελευταίο σφάλμα: {last_error}")
 
 
 @bot.tree.command(
@@ -86,47 +179,23 @@ async def tldr(interaction: discord.Interaction, hours: int):
         " υπήρχαν σημαντικές αποφάσεις ή links."
     )
 
-    # Τα επίσημα υποστηριζόμενα μοντέλα της Groq
-    candidate_models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+    try:
+        summary = await generate_summary_with_fallback(system_prompt, chat_log)
 
-    summary = None
-    last_error = None
-
-    for model_name in candidate_models:
-        try:
-            response = await groq_client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {
-                        "role": "user",
-                        "content": f"Ιστορικό Συνομιλίας:\n{chat_log}",
-                    },
-                ],
-                temperature=0.5,
-                max_tokens=1000,
+        header = f"**TL;DR Τελευταίων {hours} Ωρών** 📝\n\n"
+        if len(header + summary) > 2000:
+            summary = (
+                summary[: 1900 - len(header)]
+                + "...\n*(Η σύνοψη κόπηκε λόγω ορίου χαρακτήρων)*"
             )
-            summary = response.choices[0].message.content
-            if summary:
-                break
-        except Exception as e:
-            last_error = e
-            print(f"Groq model {model_name} failed: {e}")
 
-    if not summary:
+        await interaction.followup.send(header + summary)
+
+    except Exception as e:
+        print(f"Fallback Chain Exhausted: {e}")
         await interaction.followup.send(
-            f"Υπήρξε σφάλμα κατά τη επικοινωνία με το AI API: `{last_error}`"
+            f"Υπήρξε πρόβλημα με όλες τις υπηρεσίες AI: `{e}`"
         )
-        return
-
-    header = f"**TL;DR Τελευταίων {hours} Ωρών** 📝\n\n"
-    if len(header + summary) > 2000:
-        summary = (
-            summary[: 1900 - len(header)]
-            + "...\n*(Η σύνοψη κόπηκε λόγω ορίου χαρακτήρων)*"
-        )
-
-    await interaction.followup.send(header + summary)
 
 
 bot.run(DISCORD_TOKEN)
