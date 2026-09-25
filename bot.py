@@ -163,7 +163,11 @@ async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> s
     raise RuntimeError(f"Αποτυχία όλων των APIs:\n• {all_errors_str}")
 
 
-async def fetch_and_generate_tldr(channel: discord.TextChannel, hours: int) -> str | None:
+async def fetch_and_generate_tldr(
+    channel: discord.TextChannel, 
+    hours: int, 
+    status_callback=None
+) -> str | None:
     now = datetime.now(timezone.utc)
     
     target_cutoff = now - timedelta(hours=hours)
@@ -173,7 +177,11 @@ async def fetch_and_generate_tldr(channel: discord.TextChannel, hours: int) -> s
     target_messages = []
     context_messages = []
 
-    async for message in channel.history(after=context_cutoff, limit=5000):
+    if status_callback:
+        await status_callback(f"📥 Ανάκτηση μηνυμάτων τελευταίων {hours} ωρών...")
+
+    # Μαζεύουμε μηνύματα
+    async for message in channel.history(after=context_cutoff, limit=1200):
         if message.author.bot or not message.content.strip():
             continue
 
@@ -187,6 +195,12 @@ async def fetch_and_generate_tldr(channel: discord.TextChannel, hours: int) -> s
 
     if not target_messages:
         return None
+
+    if status_callback:
+        total_msgs = len(target_messages) + len(context_messages)
+        await status_callback(
+            f"🧠 Αναλύθηκαν **{total_msgs}** μηνύματα! Αποστολή στο AI για επεξεργασία..."
+        )
 
     context_log = "\n".join(context_messages)
     if len(context_log) > 24000:
