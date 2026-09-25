@@ -66,18 +66,20 @@ async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> s
     # 2. Gemini Provider
     if gemini_client:
         providers.append(
-            ("Gemini", gemini_client, ["gemini-2.0-flash", "gemini-1.5-flash"])
+            ("Gemini", gemini_client, ["gemini-2.5-flash", "gemini-2.0-flash"])
         )
 
-    # 3. OpenRouter Provider (Free Tier Backup)
+    # 3. OpenRouter Provider (Ενεργά Free Models)
     if openrouter_client:
         providers.append(
             (
                 "OpenRouter",
                 openrouter_client,
                 [
-                    "google/gemini-2.0-flash-exp:free",
-                    "meta-llama/llama-3.3-70b-instruct:free",
+                    "google/gemini-2.0-flash-lite-001:free",
+                    "deepseek/deepseek-r1:free",
+                    "qwen/qwen-2.5-coder-32b-instruct:free",
+                    "mistralai/mistral-7b-instruct:free",
                 ],
             )
         )
@@ -175,7 +177,7 @@ async def tldr(interaction: discord.Interaction, hours: int):
         "Είσαι ένας βοηθός Discord bot. Η δουλειά σου είναι να διαβάζεις"
         " συνομιλίες (που περιέχουν Ελληνικά, Greeklish και Αγγλικά) και να"
         " φτιάχνεις μια καθαρή, δομημένη σύνοψη (TL;DR) στα Ελληνικά με bullet"
-        " points. Αναέφερε ποιοι χρήστες συμμετείχαν στα βασικά θέματα και αν"
+        " points. Αναφέρε ποιοι χρήστες συμμετείχαν στα βασικά θέματα και αν"
         " υπήρχαν σημαντικές αποφάσεις ή links."
     )
 
