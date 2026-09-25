@@ -1,4 +1,5 @@
 import os
+import time
 from datetime import datetime, timedelta, timezone
 import discord
 from discord import app_commands
@@ -24,6 +25,12 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 GUILD_ID = None
+
+# Διάρκεια Cooldown σε δευτερόλεπτα (30 λεπτά)
+COOLDOWN_SECONDS = 1800
+
+# Dictionary για παρακολούθηση του τελευταίου timestamp ανά κανάλι: {channel_id: last_used_timestamp}
+last_used = {}
 
 
 @bot.event
@@ -163,12 +170,23 @@ async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> s
     description="Δημιουργεί σύνοψη (TL;DR) των μηνυμάτων του καναλιού.",
 )
 @app_commands.describe(hours="Πόσες ώρες πίσω να ανατρέξει το bot (1 έως 72)")
-# ---------------------------------------------------------
-# COOLDOWN: 1 χρήση ανά 1800 δευτερόλεπτα (30 λεπτά) ανά κανάλι (Channel)
-# Αν θέλεις να είναι ανά χρήστη, άλλαξε το BucketType.channel σε BucketType.user
-# ---------------------------------------------------------
-@app_commands.checks.cooldown(1, 1800.0, key=lambda i: app_commands.Cooldown.type_target(app_commands.BucketType.channel)(i))
 async def tldr(interaction: discord.Interaction, hours: int):
+    channel_id = interaction.channel_id
+    now = time.time()
+
+    # Έλεγχος Cooldown
+    if channel_id in last_used:
+        elapsed = now - last_used[channel_id]
+        if elapsed < COOLDOWN_SECONDS:
+            remaining = COOLDOWN_SECONDS - elapsed
+            minutes = int(remaining // 60)
+            seconds = int(remaining % 60)
+            await interaction.response.send_message(
+                f"⏳ Το `/tldr` είναι σε cooldown! Παρακαλώ περίμενε **{minutes} λ.** και **{seconds} δευτ.** πριν την ξαναχρησιμοποιήσεις.",
+                ephemeral=True,
+            )
+            return
+
     await interaction.response.defer(thinking=True)
 
     if hours <= 0 or hours > 72:
@@ -213,6 +231,9 @@ async def tldr(interaction: discord.Interaction, hours: int):
     try:
         summary = await generate_summary_with_fallback(system_prompt, chat_log)
 
+        # Ενημέρωση του timestamp αφού παραχθεί επιτυχώς η σύνοψη
+        last_used[channel_id] = time.time()
+
         header = f"**TL;DR Τελευταίων {hours} Ωρών** 📝\n\n"
         if len(header + summary) > 2000:
             summary = (
@@ -229,23 +250,30 @@ async def tldr(interaction: discord.Interaction, hours: int):
         )
 
 
-# ---------------------------------------------------------
-# HANDLER ΓΙΑ ΤΟ COOLDOWN ERROR
-# ---------------------------------------------------------
-@bot.tree.error
-async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.CommandOnCooldown):
-        minutes = int(error.retry_after // 60)
-        seconds = int(error.retry_after % 60)
-        
-        msg = f"⏳ Η εντολή είναι σε cooldown! Παρακαλώ περίμενε ακόμα **{minutes} λ.** και **{seconds} δευτ.** πριν την ξαναχρησιμοποιήσεις."
-        
-        if interaction.response.is_done():
-            await interaction.followup.send(msg, ephemeral=True)
-        else:
-            await interaction.response.send_message(msg, ephemeral=True)
-    else:
-        print(f"[Command Error] {error}")
+@bot.tree.command(
+    name="cooldown",
+    description="Ελέγχει πόσος χρόνος απομένει για την επόμενη χρήση του /tldr.",
+)
+async def cooldown_status(interaction: discord.Interaction):
+    channel_id = interaction.channel_id
+    now = time.time()
+
+    if channel_id in last_used:
+        elapsed = now - last_used[channel_id]
+        if elapsed < COOLDOWN_SECONDS:
+            remaining = COOLDOWN_SECONDS - elapsed
+            minutes = int(remaining // 60)
+            seconds = int(remaining % 60)
+            await interaction.response.send_message(
+                f"⏱️ Απομένουν **{minutes} λεπτά** και **{seconds} δευτερόλεπτα** μέχρι να μπορέσει να χρησιμοποιηθεί ξανά το `/tldr` στο κανάλι.",
+                ephemeral=True,
+            )
+            return
+
+    await interaction.response.send_message(
+        "✅ Το `/tldr` είναι **έτοιμο για χρήση** στο κανάλι!",
+        ephemeral=True,
+    )
 
 
 bot.run(DISCORD_TOKEN)
