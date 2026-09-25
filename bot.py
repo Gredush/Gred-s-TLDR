@@ -5,8 +5,8 @@ from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 
-# API SDKs
-from google import genai
+import aiohttp
+import google.generativeai as genai
 from groq import AsyncGroq
 
 load_dotenv()
@@ -17,7 +17,9 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # Αρχικοποίηση Clients
 groq_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
-gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -41,37 +43,37 @@ async def on_ready():
         print(f"Sync error: {e}")
 
 
+async def call_gemini_rest_fallback(prompt: str) -> str:
+    """
+    Direct REST API Call στο Gemini αν αποτύχει το SDK.
+    """
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}]
+    }
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload, timeout=30) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return data['candidates'][0]['content']['parts'][0]['text']
+            else:
+                err_text = await resp.text()
+                raise RuntimeError(f"Gemini REST Error {resp.status}: {err_text}")
+
+
 async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> str:
-    """
-    Αναζητά δυναμικά τα διαθέσιμα/ενεργά μοντέλα από Groq & Gemini
-    ώστε να μην "σπάει" ποτέ από αποσύρσεις (decommissioning).
-    """
     last_error = None
     full_prompt = f"{system_prompt}\n\nΙστορικό Συνομιλίας:\n{chat_log}"
 
     # ---------------------------------------------------------
-    # 1. ΔΟΚΙΜΗ ΜΕ GROQ (Δυναμική λίστα ενεργών μοντέλων)
+    # 1. GROQ PROVIDER
     # ---------------------------------------------------------
     if groq_client:
-        groq_models = []
-        try:
-            models_page = await groq_client.models.list()
-            # Φιλτράρουμε μόνο τα ενεργά Llama / Mixtral μοντέλα
-            for m in models_page.data:
-                m_id = m.id.lower()
-                if "llama" in m_id or "mixtral" in m_id:
-                    groq_models.append(m.id)
-            print(f"[Groq] Βρέθηκαν διαθέσιμα μοντέλα: {groq_models}")
-        except Exception as e:
-            print(f"[Groq List Models Warning] {e}")
-
-        # Fallback αν αποτύχει το list()
-        if not groq_models:
-            groq_models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
-
+        groq_models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"]
         for model_name in groq_models:
             try:
-                print(f"[Groq] Δοκιμή με μοντέλο: {model_name}...")
+                print(f"[Groq] Δοκιμή με {model_name}...")
                 response = await groq_client.chat.completions.create(
                     model=model_name,
                     messages=[
@@ -83,45 +85,47 @@ async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> s
                 )
                 summary = response.choices[0].message.content
                 if summary and summary.strip():
-                    print(f"[Groq] Επιτυχία με το {model_name}!")
+                    print(f"[Groq SUCCESS] {model_name}")
                     return summary
             except Exception as e:
                 last_error = f"Groq ({model_name}): {e}"
                 print(f"[Groq ERROR] {last_error}")
 
     # ---------------------------------------------------------
-    # 2. ΔΟΚΙΜΗ ΜΕ GEMINI (Δυναμική λίστα μοντέλων Google)
+    # 2. GEMINI PROVIDER (Standard SDK)
     # ---------------------------------------------------------
-    if gemini_client:
-        gemini_models = []
-        try:
-            async for m in gemini_client.aio.models.list():
-                model_id = m.name.replace("models/", "")
-                if "flash" in model_id or "generateContent" in getattr(m, "supported_generation_methods", []):
-                    gemini_models.append(model_id)
-            print(f"[Gemini] Βρέθηκαν διαθέσιμα μοντέλα: {gemini_models}")
-        except Exception as e:
-            print(f"[Gemini List Models Warning] {e}")
-
-        if not gemini_models:
-            gemini_models = ["gemini-2.5-flash", "gemini-2.0-flash"]
-
+    if GEMINI_API_KEY:
+        gemini_models = ["gemini-1.5-flash", "gemini-1.5-pro"]
         for model_name in gemini_models:
             try:
-                print(f"[Gemini] Δοκιμή με μοντέλο: {model_name}...")
-                response = await gemini_client.aio.models.generate_content(
-                    model=model_name,
-                    contents=full_prompt,
+                print(f"[Gemini SDK] Δοκιμή με {model_name}...")
+                model = genai.GenerativeModel(
+                    model_name=model_name,
+                    system_instruction=system_prompt
                 )
+                response = await model.generate_content_async(f"Ιστορικό Συνομιλίας:\n{chat_log}")
                 summary = response.text
                 if summary and summary.strip():
-                    print(f"[Gemini] Επιτυχία με το {model_name}!")
+                    print(f"[Gemini SDK SUCCESS] {model_name}")
                     return summary
             except Exception as e:
-                last_error = f"Gemini ({model_name}): {e}"
-                print(f"[Gemini ERROR] {last_error}")
+                last_error = f"Gemini SDK ({model_name}): {e}"
+                print(f"[Gemini SDK ERROR] {last_error}")
 
-    raise RuntimeError(f"Όλα τα AI APIs απέτυχαν. Τελευταίο σφάλμα: {last_error}")
+        # ---------------------------------------------------------
+        # 3. GEMINI REST FALLBACK (Όταν όλα τα SDKs αποτύχουν)
+        # ---------------------------------------------------------
+        try:
+            print("[Gemini REST] Δοκιμή απευθείας HTTP κλήσης...")
+            summary = await call_gemini_rest_fallback(full_prompt)
+            if summary and summary.strip():
+                print("[Gemini REST SUCCESS]")
+                return summary
+        except Exception as e:
+            last_error = f"Gemini REST: {e}"
+            print(f"[Gemini REST ERROR] {last_error}")
+
+    raise RuntimeError(f"Όλα τα AI APIs απέτυχαν. Τελευταίο καταγεγραμμένο σφάλμα: {last_error}")
 
 
 @bot.tree.command(
