@@ -176,7 +176,7 @@ async def fetch_and_generate_tldr(channel: discord.TextChannel, hours: int) -> s
     # παράθυρο, αυτά που κόβονται είναι τα παλιότερα -- όχι τα πιο πρόσφατα.
     # Με after=... και την προεπιλεγμένη σειρά (oldest_first) θα γέμιζε το
     # όριο με τα παλιότερα μηνύματα και θα σταματούσε πριν φτάσει στο τώρα.
-    async for message in channel.history(after=cutoff_time, limit=500, oldest_first=False):
+    async for message in channel.history(after=cutoff_time, limit=750, oldest_first=False):
         if message.author.bot or not message.content.strip():
             continue
 
@@ -192,8 +192,8 @@ async def fetch_and_generate_tldr(channel: discord.TextChannel, hours: int) -> s
     messages_list.reverse()
 
     chat_log = "\n".join(messages_list)
-    if len(chat_log) > 15000:
-        chat_log = chat_log[-15000:]
+    if len(chat_log) > 22500:
+        chat_log = chat_log[-22500:]
 
     system_prompt = (
         "Είσαι ένας εξαιρετικά ακριβής, αντικειμενικός και επαγγελματίας αναλυτής συνομιλιών Discord.\n"
