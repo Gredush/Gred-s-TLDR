@@ -129,8 +129,8 @@ async def generate_summary_with_fallback(system_prompt: str, chat_log: str) -> s
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": f"Ιστορικό Συνομιλίας:\n{chat_log}"},
                     ],
-                    temperature=0.5,
-                    max_tokens=1000,
+                    temperature=0.3,
+                    max_tokens=1500,
                 )
                 summary = response.choices[0].message.content
                 if summary and summary.strip():
