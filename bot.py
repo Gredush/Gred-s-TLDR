@@ -334,4 +334,33 @@ async def cooldown_status(interaction: discord.Interaction):
     )
 
 
+@bot.tree.command(
+    name="resetcd",
+    description="Μηδενίζει το cooldown της εντολής /tldr (Μόνο για Διαχειριστές).",
+)
+@app_commands.describe(all_channels="Καθαρισμός cooldown για όλα τα κανάλια;")
+@app_commands.default_permissions(administrator=True)
+async def reset_cooldown(interaction: discord.Interaction, all_channels: bool = False):
+    channel_id = interaction.channel_id
+
+    if all_channels:
+        last_used.clear()
+        await interaction.response.send_message(
+            "🔄 Το cooldown του `/tldr` μηδενίστηκε **για όλα τα κανάλια**!",
+            ephemeral=True,
+        )
+    else:
+        if channel_id in last_used:
+            del last_used[channel_id]
+            await interaction.response.send_message(
+                "🔄 Το cooldown του `/tldr` μηδενίστηκε για **αυτό το κανάλι**!",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                "ℹ️ Δεν υπήρχε ενεργό cooldown σε αυτό το κανάλι.",
+                ephemeral=True,
+            )
+
+
 bot.run(DISCORD_TOKEN)
