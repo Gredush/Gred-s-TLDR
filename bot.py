@@ -1,6 +1,9 @@
 import asyncio
+import base64
+import io
 import os
 import time
+import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, time as dtime
 from functools import partial
@@ -23,6 +26,15 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY")  # προαιρετικό
 AUTO_TLDR_CHANNEL_ID = os.getenv("AUTO_TLDR_CHANNEL_ID")
+
+# Εικόνα (προαιρετικά: χωρίς αυτά χρησιμοποιείται το Pollinations)
+CF_ACCOUNT_ID = os.getenv("CF_ACCOUNT_ID")
+CF_API_TOKEN = os.getenv("CF_API_TOKEN")
+CF_IMAGE_MODEL = os.getenv("CF_IMAGE_MODEL", "@cf/black-forest-labs/flux-1-schnell")
+CF_IMAGE_STEPS = int(os.getenv("CF_IMAGE_STEPS", "6"))  # schnell: 1-8
+IMAGE_ENABLED = os.getenv("IMAGE_ENABLED", "true").lower() == "true"
+IMAGE_TIMEOUT = 45          # ανά πάροχο εικόνας
+IMAGE_TOTAL_TIMEOUT = 85    # σύνολο για prompt + εικόνα
 
 
 def env_list(name: str, default: str) -> list[str]:
@@ -124,6 +136,29 @@ SPICY_ADDON = """
 - Αν δεν υπάρχει κάτι πρόσφορο, μη βάλεις τίποτα. Η σύνοψη μένει κανονική.
 """
 
+IMAGE_PROMPT_SYSTEM = """\
+You write prompts for a text-to-image model (FLUX). You will receive a Greek-language summary of a Discord chat. Write ONE English image prompt for a single satirical, humorous image that looks like a real frame from a television news broadcast covering the situation described in the chat.
+
+Scene format (pick whichever fits better):
+A) an on-location TV news reporter holding a microphone, standing in front of the absurd situation unfolding behind them, speaking to the camera with a completely serious, professional expression; or
+B) a news anchor at a studio desk, with a large screen behind them showing a dramatic, absurd visual of the situation.
+
+Rules:
+- The humor comes from the contrast between the dead-serious news presentation and the ridiculous, exaggerated subject. Pick the 1-2 most prominent themes of the chat and exaggerate them into ONE scene.
+- Describe it like a real broadcast still: camera framing, lighting, location, clothing and expressions, and what is happening in the background. Be concrete and visual, avoid abstract words.
+- Reporters, anchors and bystanders must be generic, fictional, non-recognisable people. NEVER depict real, named or recognisable people, celebrities, politicians, or the chat's usernames.
+- Do NOT ask for any readable text, captions, tickers, channel logos or brand names. If useful, mention a blank generic lower-third graphic bar without any text.
+- Avoid sexual content, gore, hate, real tragedies and sensitive topics (religion, politics, health, minors). If the chat is about such a topic, depict a harmless absurd metaphor with objects or animals instead.
+- Keep the satire gentle and playful: laugh at the situation, never at individuals.
+- 60-100 words. Output ONLY the prompt: no preamble, no quotes, no explanations.
+"""
+
+IMAGE_STYLE_SUFFIX = (
+    " Photorealistic still frame from a live television news broadcast, "
+    "professional broadcast camera, soft studio lighting, 16:9 widescreen framing, "
+    "slight video look, sharp focus, highly detailed, no readable text, no logos, no watermark."
+)
+
 
 # ------------------------------------------------------------------
 # Βοηθητικά
@@ -159,7 +194,7 @@ def build_log(lines: list[str], max_chars: int) -> str:
 
 
 # ------------------------------------------------------------------
-# Πάροχοι AI
+# Πάροχοι AI (κείμενο)
 # ------------------------------------------------------------------
 @dataclass
 class Provider:
@@ -308,12 +343,97 @@ async def fetch_and_generate_tldr(channel: discord.TextChannel, hours: int) -> s
 
 
 # ------------------------------------------------------------------
+# Εικόνα (στυλ δελτίου ειδήσεων)
+# ------------------------------------------------------------------
+async def build_image_prompt(summary: str) -> str:
+    text = await generate_summary(IMAGE_PROMPT_SYSTEM, [summary])
+    text = " ".join(text.replace('"', "").split())
+    return text[:900]
+
+
+async def _cf_image(prompt: str) -> bytes:
+    url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/run/{CF_IMAGE_MODEL}"
+    headers = {"Authorization": f"Bearer {CF_API_TOKEN}"}
+    payload = {"prompt": prompt, "steps": CF_IMAGE_STEPS}
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            url, json=payload, headers=headers,
+            timeout=aiohttp.ClientTimeout(total=IMAGE_TIMEOUT),
+        ) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"HTTP {resp.status}: {(await resp.text())[:200]}")
+            if resp.content_type.startswith("image/"):
+                return await resp.read()
+            data = await resp.json()
+            b64 = (data.get("result") or {}).get("image")
+            if not b64:
+                raise RuntimeError("Η απάντηση δεν περιείχε εικόνα")
+            return base64.b64decode(b64)
+
+
+async def _pollinations_image(prompt: str) -> bytes:
+    url = "https://image.pollinations.ai/prompt/" + urllib.parse.quote(prompt)
+    params = {
+        "model": "flux", "width": 1024, "height": 576,
+        "nologo": "true", "seed": int(time.time()),
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            url, params=params,
+            timeout=aiohttp.ClientTimeout(total=IMAGE_TIMEOUT),
+        ) as resp:
+            if resp.status != 200 or not resp.content_type.startswith("image/"):
+                raise RuntimeError(f"HTTP {resp.status} ({resp.content_type})")
+            return await resp.read()
+
+
+async def generate_image(summary: str) -> bytes | None:
+    """Επιστρέφει bytes εικόνας ή None. Δεν πετάει ποτέ exception."""
+    if not IMAGE_ENABLED:
+        return None
+
+    async def _run() -> bytes | None:
+        prompt = await build_image_prompt(summary) + IMAGE_STYLE_SUFFIX
+        print(f"[Image prompt] {prompt}")
+
+        backends = []
+        if CF_ACCOUNT_ID and CF_API_TOKEN:
+            backends.append(("cloudflare", _cf_image))
+        backends.append(("pollinations", _pollinations_image))
+
+        for name, fn in backends:
+            try:
+                return await asyncio.wait_for(fn(prompt), timeout=IMAGE_TIMEOUT)
+            except Exception as e:
+                print(f"[Image {name} failed] {str(e)[:200]}")
+        return None
+
+    try:
+        return await asyncio.wait_for(_run(), timeout=IMAGE_TOTAL_TIMEOUT)
+    except Exception as e:
+        print(f"[Image skipped] {str(e)[:200]}")
+        return None
+
+
+async def make_tldr_payload(channel: discord.TextChannel, hours: int, header: str):
+    """Επιστρέφει (κείμενο, discord.File | None) ή None αν δεν υπάρχουν μηνύματα."""
+    summary = await fetch_and_generate_tldr(channel, hours=hours)
+    if not summary:
+        return None
+    text = fit_to_discord_limit(header, summary)
+    image = await generate_image(summary)
+    file = discord.File(io.BytesIO(image), filename="tldr.jpg") if image else None
+    return text, file
+
+
+# ------------------------------------------------------------------
 # Discord
 # ------------------------------------------------------------------
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user.name} (ID: {bot.user.id})")
     print(f"Providers: {[p.key for p in PROVIDERS]}")
+    print(f"Image: enabled={IMAGE_ENABLED}, cloudflare={'yes' if CF_ACCOUNT_ID and CF_API_TOKEN else 'no'}")
     try:
         if GUILD_ID:
             bot.tree.copy_global_to(guild=GUILD_ID)
@@ -338,10 +458,19 @@ async def auto_tldr_task():
         channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
 
         if isinstance(channel, discord.TextChannel):
-            summary = await fetch_and_generate_tldr(channel, hours=AUTO_TLDR_HOURS)
-            if summary:
-                header = f"🤖 **Αυτόματο TL;DR Τελευταίων {AUTO_TLDR_HOURS} Ωρών** 📝\n\n"
-                await channel.send(fit_to_discord_limit(header, summary))
+            header = f"🤖 **Αυτόματο TL;DR Τελευταίων {AUTO_TLDR_HOURS} Ωρών** 📝\n\n"
+            payload = await make_tldr_payload(channel, AUTO_TLDR_HOURS, header)
+            if payload:
+                text, file = payload
+                try:
+                    if file:
+                        await channel.send(text, file=file)
+                    else:
+                        await channel.send(text)
+                except Exception as e:
+                    print(f"[Auto TLDR send with image failed] {e}")
+                    if file:
+                        await channel.send(text)  # ξανά χωρίς εικόνα
     except Exception as e:
         print(f"[Auto TLDR Error] {e}")
 
@@ -351,11 +480,19 @@ async def before_auto_tldr():
     await bot.wait_until_ready()
 
 
-async def safe_followup(interaction: discord.Interaction, text: str):
+async def safe_followup(interaction: discord.Interaction, text: str, file: discord.File | None = None):
     try:
-        await interaction.followup.send(text[:1900])
+        if file:
+            await interaction.followup.send(text[:1900], file=file)
+        else:
+            await interaction.followup.send(text[:1900])
     except Exception as e:
         print(f"[Followup Error] {e}")
+        if file:  # δεύτερη προσπάθεια χωρίς εικόνα
+            try:
+                await interaction.followup.send(text[:1900])
+            except Exception as e2:
+                print(f"[Followup retry Error] {e2}")
 
 
 @bot.tree.command(
@@ -398,14 +535,15 @@ async def tldr(interaction: discord.Interaction, hours: int):
             await safe_followup(interaction, "Αυτή η εντολή υποστηρίζεται μόνο σε κείμενα καναλιών.")
             return
 
-        summary = await fetch_and_generate_tldr(channel, hours=hours)
-        if not summary:
+        header = f"**TL;DR Τελευταίων {hours} Ωρών** 📝\n\n"
+        payload = await make_tldr_payload(channel, hours, header)
+        if not payload:
             await safe_followup(interaction, f"Δεν βρέθηκαν νέα μηνύματα τις τελευταίες {hours} ώρες.")
             return
 
         last_used[channel_id] = time.time()
-        header = f"**TL;DR Τελευταίων {hours} Ωρών** 📝\n\n"
-        await safe_followup(interaction, fit_to_discord_limit(header, summary))
+        text, file = payload
+        await safe_followup(interaction, text, file)
 
     except SummaryError as e:
         await safe_followup(interaction, f"⚠️ {e}")
