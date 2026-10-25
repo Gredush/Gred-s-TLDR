@@ -27,6 +27,10 @@ A Discord bot token
 Dependencies from requirements.txt
 
 
+License
+This project is proprietary. All rights reserved. No part of this code may be used, copied, modified, or distributed without explicit permission from the author.
+
+
 Ένα Discord bot που δημιουργεί περιλήψεις TL;DR από μηνύματα/συνομιλίες, με υποστήριξη για γραφικά τύπου «news broadcast».
 
 ✨ Δυνατότητες
@@ -47,6 +51,9 @@ Discord bot framework (π.χ. discord.py — επιβεβαίωσε από το 
 
 📋 Απαιτήσεις
 Python 3.9+ (προσάρμοσε ανάλογα)
+
+Άδεια
+Αυτό το έργο είναι ιδιόκτητο. Με την επιφύλαξη παντός δικαιώματος. Κανένα μέρος αυτού του κώδικα δεν επιτρέπεται να χρησιμοποιηθεί, να αντιγραφεί, να τροποποιηθεί ή να διανεμηθεί χωρίς ρητή άδεια από τον συγγραφέα.
 
 Token για το Discord bot
 
