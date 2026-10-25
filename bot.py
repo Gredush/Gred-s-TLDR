@@ -66,6 +66,23 @@ GROQ_DEFAULT_MAX_CHARS = 6_500
 PER_CALL_TIMEOUT = 40   # δευτερόλεπτα ανά κλήση
 TOTAL_TIMEOUT = 110     # συνολικό όριο για όλη την αλυσίδα
 
+# ------------------------------------------------------------------
+# Catch-up TL;DR: μόνο όταν η δραστηριότητα της ΤΕΛΕΥΤΑΙΑΣ ΩΡΑΣ είναι αισθητά πάνω από το συνηθισμένο
+# ------------------------------------------------------------------
+CATCHUP_ENABLED = os.getenv("CATCHUP_ENABLED", "true").lower() == "true"
+# "Έξαρση" = χαρακτήρες τελευταίας ώρας >= FACTOR x τυπική ενεργή ώρα του καναλιού (τελευταίο 24ωρο)
+CATCHUP_SURGE_FACTOR = float(os.getenv("CATCHUP_SURGE_FACTOR", "3"))
+# ...και τουλάχιστον τόσοι χαρακτήρες την τελευταία ώρα (αποφεύγει "έξαρση" σε νεκρά κανάλια)
+CATCHUP_MIN_RECENT_CHARS = int(os.getenv("CATCHUP_MIN_RECENT_CHARS", "6000"))
+# Ελάχιστοι νέοι χαρακτήρες από την τελευταία σύνοψη, ώστε να υπάρχει κάτι άξιο σύνοψης
+CATCHUP_MIN_NEW_CHARS = int(os.getenv("CATCHUP_MIN_NEW_CHARS", "5000"))
+CATCHUP_BASELINE_HOURS = int(os.getenv("CATCHUP_BASELINE_HOURS", "24"))
+CATCHUP_BASELINE_FLOOR = int(os.getenv("CATCHUP_BASELINE_FLOOR", "1500"))  # χαρ./ώρα (κατώτατο baseline)
+CATCHUP_MIN_INTERVAL = int(os.getenv("CATCHUP_MIN_INTERVAL", "900"))       # ελάχιστο κενό ανά κανάλι (δευτ.)
+CATCHUP_WITH_IMAGE = os.getenv("CATCHUP_WITH_IMAGE", "false").lower() == "true"
+# Προαιρετικά: μόνο συγκεκριμένα κανάλια (IDs χωρισμένα με κόμμα). Κενό = όλα.
+CATCHUP_CHANNEL_IDS = {int(x) for x in env_list("CATCHUP_CHANNEL_IDS", "") if x.isdigit()}
+
 groq_client = (
     AsyncGroq(api_key=GROQ_API_KEY, max_retries=0, timeout=PER_CALL_TIMEOUT)
     if GROQ_API_KEY else None
@@ -81,6 +98,22 @@ GUILD_ID = None
 COOLDOWN_SECONDS = 1800
 last_used: dict[int, float] = {}
 in_progress: set[int] = set()
+
+# Κατάσταση catch-up ανά κανάλι
+catchup_chars: dict[int, int] = {}          # χαρακτήρες log από την τελευταία σύνοψη
+catchup_since: dict[int, datetime] = {}     # από πότε μετράμε
+catchup_last_run: dict[int, float] = {}     # monotonic χρόνος τελευταίου catch-up
+catchup_retry_at: dict[int, float] = {}     # επόμενη δοκιμή μετά από αποτυχία
+catchup_disabled: set[int] = set()          # κανάλια χωρίς δικαιώματα
+
+# Ιστορικό δραστηριότητας: ανά κανάλι, χαρακτήρες ανά λεπτό (για να βρίσκουμε εξάρσεις)
+activity_buckets: dict[int, dict[int, int]] = {}
+activity_ready: set[int] = set()            # κανάλια με φορτωμένο ιστορικό 24ώρου
+activity_bootstrapping: set[int] = set()
+activity_last_check: dict[int, float] = {}
+bootstrap_sem = asyncio.Semaphore(2)        # όχι πολλά history fetch μαζί
+SUMMARY_PREFIXES = ("**TL;DR", "🤖 **Αυτόματο TL;DR", "⚡ **Catch-up TL;DR")
+background_tasks: set = set()
 
 ATHENS_TZ = ZoneInfo("Europe/Athens")
 AUTO_TLDR_HOURS = 4
@@ -330,17 +363,31 @@ async def generate_summary(system_prompt: str, lines: list[str]) -> str:
     raise SummaryError("Όλες οι υπηρεσίες AI είναι προσωρινά απασχολημένες. Δοκίμασε ξανά σε λίγα λεπτά.")
 
 
-async def fetch_and_generate_tldr(channel: discord.TextChannel, hours: int) -> str | None:
-    cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
+def format_message_line(message: discord.Message) -> str | None:
+    """Η ΙΔΙΑ μορφή που μπαίνει στο prompt (χρησιμοποιείται και για το μέτρημα χαρακτήρων)."""
+    content = message.clean_content.strip()
+    if message.author.bot or not content:
+        return None
+    ts = message.created_at.astimezone(ATHENS_TZ).strftime("%H:%M")
+    return f"[{ts}] {message.author.display_name}: {content[:600]}"
+
+
+def reset_catchup(channel_id: int) -> None:
+    catchup_chars.pop(channel_id, None)
+    catchup_since.pop(channel_id, None)
+
+
+async def fetch_and_generate_tldr(
+    channel: discord.TextChannel, hours: int | None = None, after: datetime | None = None
+) -> str | None:
+    cutoff_time = after if after else datetime.now(timezone.utc) - timedelta(hours=hours)
     lines: list[str] = []
 
     # Από το πιο πρόσφατο προς τα πίσω, ώστε αν κοπεί κάτι να είναι τα παλιότερα.
-    async for message in channel.history(after=cutoff_time, limit=750, oldest_first=False):
-        content = message.clean_content.strip()
-        if message.author.bot or not content:
-            continue
-        ts = message.created_at.astimezone(ATHENS_TZ).strftime("%H:%M")
-        lines.append(f"[{ts}] {message.author.display_name}: {content[:600]}")
+    async for message in channel.history(after=cutoff_time, limit=1000, oldest_first=False):
+        line = format_message_line(message)
+        if line:
+            lines.append(line)
 
     if not lines:
         return None
@@ -470,13 +517,16 @@ async def generate_image(summary: str) -> bytes | None:
         return None
 
 
-async def make_tldr_payload(channel: discord.TextChannel, hours: int, header: str):
+async def make_tldr_payload(
+    channel: discord.TextChannel, hours: int | None, header: str,
+    after: datetime | None = None, with_image: bool = True,
+):
     """Επιστρέφει (κείμενο, discord.File | None) ή None αν δεν υπάρχουν μηνύματα."""
-    summary = await fetch_and_generate_tldr(channel, hours=hours)
+    summary = await fetch_and_generate_tldr(channel, hours=hours, after=after)
     if not summary:
         return None
     text = fit_to_discord_limit(header, summary)
-    image = await generate_image(summary)
+    image = await generate_image(summary) if with_image else None
     file = discord.File(io.BytesIO(image), filename="tldr.jpg") if image else None
     return text, file
 
@@ -488,6 +538,8 @@ async def make_tldr_payload(channel: discord.TextChannel, hours: int, header: st
 async def on_ready():
     print(f"Logged in as {bot.user.name} (ID: {bot.user.id})")
     print(f"Providers: {[p.key for p in PROVIDERS]}")
+    print(f"Catch-up: enabled={CATCHUP_ENABLED}, surge>={CATCHUP_SURGE_FACTOR}x, "
+          f"min_recent={CATCHUP_MIN_RECENT_CHARS}, channels={sorted(CATCHUP_CHANNEL_IDS) or 'ALL'}")
     print(f"Image: enabled={IMAGE_ENABLED}, cloudflare={'yes' if CF_ACCOUNT_ID and CF_API_TOKEN else 'no'}")
     try:
         if GUILD_ID:
@@ -504,6 +556,167 @@ async def on_ready():
         auto_tldr_task.start()
 
 
+async def run_catchup(channel: discord.TextChannel):
+    cid = channel.id
+    chars = catchup_chars.pop(cid, 0)
+    since = catchup_since.pop(cid, None)
+    success = False
+    try:
+        if since is None:
+            success = True
+            return
+        start = since.astimezone(ATHENS_TZ).strftime("%H:%M")
+        header = f"⚡ **Catch-up TL;DR** (έντονη δραστηριότητα από τις {start}) 📝\n\n"
+        payload = await make_tldr_payload(
+            channel, None, header, after=since, with_image=CATCHUP_WITH_IMAGE
+        )
+        if payload:
+            text, file = payload
+            try:
+                if file:
+                    await channel.send(text, file=file)
+                else:
+                    await channel.send(text)
+            except discord.Forbidden:
+                raise
+            except Exception as e:
+                print(f"[Catch-up send with image failed] {e}")
+                if file:
+                    await channel.send(text)
+        success = True
+        catchup_last_run[cid] = time.monotonic()
+    except discord.Forbidden:
+        catchup_disabled.add(cid)
+        success = True  # δεν ξαναδοκιμάζουμε σε κανάλι χωρίς δικαιώματα
+        print(f"[Catch-up] Χωρίς δικαιώματα στο κανάλι {cid}, απενεργοποιήθηκε.")
+    except Exception as e:
+        print(f"[Catch-up Error] {e!r}")
+    finally:
+        if not success and since is not None:
+            # επαναφορά μετρητή (συν ό,τι ήρθε στο μεταξύ) και νέα δοκιμή σε 3 λεπτά
+            catchup_chars[cid] = catchup_chars.get(cid, 0) + chars
+            catchup_since[cid] = since
+            catchup_retry_at[cid] = time.monotonic() + 180
+        in_progress.discard(cid)
+
+
+def surge_status(cid: int, now_ts: float) -> tuple[bool, int, float]:
+    """(έξαρση;, χαρακτήρες τελευταίας ώρας, τυπική ενεργή ώρα)."""
+    buckets = activity_buckets.get(cid) or {}
+    now_min = int(now_ts // 60)
+
+    oldest = now_min - CATCHUP_BASELINE_HOURS * 60 + 1
+    for m in [m for m in buckets if m < oldest]:
+        del buckets[m]  # καθαρισμός παλιών
+
+    hours: dict[int, int] = {}
+    for m, c in buckets.items():
+        h = max(0, (now_min - m) // 60)   # 0 = τελευταία ώρα, 1 = η προηγούμενη, ...
+        hours[h] = hours.get(h, 0) + c
+
+    recent = hours.get(0, 0)
+    past = [v for h, v in hours.items() if h >= 1 and v > 0]   # μόνο ώρες με δραστηριότητα
+    typical = sum(past) / len(past) if len(past) >= 2 else 0.0
+    baseline = max(typical, float(CATCHUP_BASELINE_FLOOR))
+
+    surge = recent >= CATCHUP_MIN_RECENT_CHARS and recent >= CATCHUP_SURGE_FACTOR * baseline
+    return surge, recent, baseline
+
+
+async def bootstrap_activity(channel: discord.TextChannel, before: datetime):
+    """Φορτώνει μία φορά το ιστορικό 24ώρου, ώστε το baseline και ο μετρητής να επιβιώνουν από restart."""
+    cid = channel.id
+    window_start = before - timedelta(hours=CATCHUP_BASELINE_HOURS)
+    buckets = activity_buckets.setdefault(cid, {})
+    entries: list[tuple[datetime, int]] = []
+    last_summary_at: datetime | None = None
+    try:
+        async with bootstrap_sem:
+            async for m in channel.history(after=window_start, before=before, limit=3000, oldest_first=False):
+                if (last_summary_at is None and bot.user is not None
+                        and m.author.id == bot.user.id and m.content.startswith(SUMMARY_PREFIXES)):
+                    last_summary_at = m.created_at
+                line = format_message_line(m)
+                if not line:
+                    continue
+                n = len(line) + 1
+                minute = int(m.created_at.timestamp() // 60)
+                buckets[minute] = buckets.get(minute, 0) + n
+                entries.append((m.created_at, n))
+    except discord.Forbidden:
+        catchup_disabled.add(cid)
+        print(f"[Catch-up] Χωρίς πρόσβαση στο ιστορικό του καναλιού {cid}, απενεργοποιήθηκε.")
+    except Exception as e:
+        print(f"[Catch-up bootstrap Error] {e!r}")
+    finally:
+        since = last_summary_at or window_start
+        acc = sum(n for t, n in entries if t > since)
+        if acc > 0:
+            catchup_chars[cid] = catchup_chars.get(cid, 0) + acc
+            first = catchup_since.get(cid)
+            catchup_since[cid] = since if first is None else min(first, since)
+        activity_ready.add(cid)
+        activity_bootstrapping.discard(cid)
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    await bot.process_commands(message)
+
+    if not CATCHUP_ENABLED or message.guild is None:
+        return
+    channel = message.channel
+    if not isinstance(channel, discord.TextChannel):
+        return
+    cid = channel.id
+    if cid in catchup_disabled or (CATCHUP_CHANNEL_IDS and cid not in CATCHUP_CHANNEL_IDS):
+        return
+
+    line = format_message_line(message)
+    if not line:
+        return
+
+    n = len(line) + 1
+    minute = int(message.created_at.timestamp() // 60)
+    buckets = activity_buckets.setdefault(cid, {})
+    buckets[minute] = buckets.get(minute, 0) + n
+    if cid not in catchup_since:
+        catchup_since[cid] = message.created_at - timedelta(seconds=1)
+    catchup_chars[cid] = catchup_chars.get(cid, 0) + n
+
+    # Πρώτη φορά για το κανάλι μετά από εκκίνηση: φόρτωσε ιστορικό 24ώρου στο παρασκήνιο
+    if cid not in activity_ready:
+        if cid not in activity_bootstrapping:
+            activity_bootstrapping.add(cid)
+            t = asyncio.create_task(bootstrap_activity(channel, message.created_at))
+            background_tasks.add(t)
+            t.add_done_callback(background_tasks.discard)
+        return
+
+    if catchup_chars[cid] < CATCHUP_MIN_NEW_CHARS or cid in in_progress:
+        return
+    now = time.monotonic()
+    if now < catchup_retry_at.get(cid, 0):
+        return
+    last = catchup_last_run.get(cid)
+    if last is not None and now - last < CATCHUP_MIN_INTERVAL:
+        return
+    if now - activity_last_check.get(cid, -1e9) < 20:  # έλεγχος έξαρσης το πολύ κάθε 20"
+        return
+    activity_last_check[cid] = now
+
+    surge, recent, baseline = surge_status(cid, time.time())
+    if not surge:
+        return
+    print(f"[Catch-up] Έξαρση στο {cid}: {recent} χαρ. την τελευταία ώρα "
+          f"(τυπική ώρα ~{baseline:.0f}) -> σύνοψη")
+
+    in_progress.add(cid)
+    task = asyncio.create_task(run_catchup(channel))
+    background_tasks.add(task)
+    task.add_done_callback(background_tasks.discard)
+
+
 @tasks.loop(time=AUTO_TLDR_TIMES)
 async def auto_tldr_task():
     if not AUTO_TLDR_CHANNEL_ID:
@@ -517,6 +730,7 @@ async def auto_tldr_task():
             payload = await make_tldr_payload(channel, AUTO_TLDR_HOURS, header)
             if payload:
                 text, file = payload
+                reset_catchup(channel_id)
                 try:
                     if file:
                         await channel.send(text, file=file)
@@ -597,6 +811,7 @@ async def tldr(interaction: discord.Interaction, hours: int):
             return
 
         last_used[channel_id] = time.time()
+        reset_catchup(channel_id)
         text, file = payload
         await safe_followup(interaction, text, file)
 
