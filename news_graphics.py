@@ -101,7 +101,7 @@ def render_news_frame(
     subhead: str,
     ticker: list[str],
     time_str: str,
-    channel_name: str = "TL;DR NEWS",
+    channel_name: str = "GreekCraft Έκτακτο Δέλτιο",
 ) -> bytes:
     base = _cover_resize(Image.open(io.BytesIO(image_bytes))).convert("RGBA")
     overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
