@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import io
+import json
 import os
 import time
 import urllib.parse
@@ -19,6 +20,8 @@ from google import genai
 from google.genai import types
 from groq import AsyncGroq
 
+from news_graphics import render_news_frame
+
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
@@ -34,7 +37,7 @@ CF_IMAGE_MODEL = os.getenv("CF_IMAGE_MODEL", "@cf/black-forest-labs/flux-1-schne
 CF_IMAGE_STEPS = int(os.getenv("CF_IMAGE_STEPS", "6"))  # schnell: 1-8
 IMAGE_ENABLED = os.getenv("IMAGE_ENABLED", "true").lower() == "true"
 IMAGE_TIMEOUT = 45          # ανά πάροχο εικόνας
-IMAGE_TOTAL_TIMEOUT = 85    # σύνολο για prompt + εικόνα
+IMAGE_TOTAL_TIMEOUT = 100   # σύνολο για σχέδιο + εικόνα + γραφικά
 
 
 def env_list(name: str, default: str) -> list[str]:
@@ -86,7 +89,7 @@ AUTO_TLDR_TIMES = [
     for i in range(24 // AUTO_TLDR_HOURS)
 ]
 
-# Κανάλι με "πικάντικο" ύφος:
+# Κανάλι με "πικάντικο" ύφος
 SPICY_CHANNEL_ID = 785612058360021033
 
 
@@ -136,27 +139,36 @@ SPICY_ADDON = """
 - Αν δεν υπάρχει κάτι πρόσφορο, μη βάλεις τίποτα. Η σύνοψη μένει κανονική.
 """
 
-IMAGE_PROMPT_SYSTEM = """\
-You write prompts for a text-to-image model (FLUX). You will receive a Greek-language summary of a Discord chat. Write ONE English image prompt for a single satirical, humorous image that looks like a real frame from a television news broadcast covering the situation described in the chat.
+NEWS_PLAN_SYSTEM = """\
+You create a satirical "breaking news" TV frame from a Greek-language summary of a Discord chat. Return ONLY a JSON object (no markdown fences, no commentary) with exactly these keys:
 
-Scene format (pick whichever fits better):
-A) an on-location TV news reporter holding a microphone, standing in front of the absurd situation unfolding behind them, speaking to the camera with a completely serious, professional expression; or
-B) a news anchor at a studio desk, with a large screen behind them showing a dramatic, absurd visual of the situation.
+{
+  "image_prompt": "...",
+  "headline": "...",
+  "subhead": "...",
+  "ticker": ["...", "...", "..."]
+}
 
-Rules:
-- The humor comes from the contrast between the dead-serious news presentation and the ridiculous, exaggerated subject. Pick the 1-2 most prominent themes of the chat and exaggerate them into ONE scene.
-- Describe it like a real broadcast still: camera framing, lighting, location, clothing and expressions, and what is happening in the background. Be concrete and visual, avoid abstract words.
-- Reporters, anchors and bystanders must be generic, fictional, non-recognisable people. NEVER depict real, named or recognisable people, celebrities, politicians, or the chat's usernames.
-- Do NOT ask for any readable text, captions, tickers, channel logos or brand names. If useful, mention a blank generic lower-third graphic bar without any text.
-- Avoid sexual content, gore, hate, real tragedies and sensitive topics (religion, politics, health, minors). If the chat is about such a topic, depict a harmless absurd metaphor with objects or animals instead.
-- Keep the satire gentle and playful: laugh at the situation, never at individuals.
-- 60-100 words. Output ONLY the prompt: no preamble, no quotes, no explanations.
+image_prompt (English, 50-90 words): a photorealistic still frame of a live TV news studio. A female news anchor (generic, fictional, non-recognisable) sits at a sleek modern studio desk, medium shot, looking straight into the camera with a serious, professional expression. Behind her, a large video wall shows an exaggerated, absurd, photographic visual of the chat's main topic. Describe the lighting, the camera and the video wall content concretely. The image must contain NO text, letters, numbers, captions, tickers or logos anywhere (the news graphics are added later by software). Keep the bottom fifth of the frame simple (desk surface).
+
+headline (Greek, max 70 characters): the breaking-news headline about the most prominent topic discussed. Dead-serious, sensational news tone applied to a trivial or funny subject. Strictly based on what was actually discussed.
+
+subhead (Greek, max 90 characters): a one-line follow-up in the same deadpan news style.
+
+ticker (array of 1-3 Greek strings, each max 40 characters): other topics from the chat as short news-ticker headlines. Use fewer items if there were fewer topics.
+
+Rules for all Greek text:
+- Correct Greek with normal accents and normal capitalisation (the software handles capitals).
+- Base everything on topics really present in the summary. Do not invent events or facts.
+- Never include usernames or real people's names. Refer to "το κανάλι", "μέλη", "η παρέα" instead.
+- Gentle satire: laugh at the situation, never at individuals. No insults.
+- Avoid sexual content, hate, real tragedies and sensitive topics (religion, politics, health, minors). If the chat covers those, write about a harmless aspect, e.g. an intense discussion in the channel.
 """
 
 IMAGE_STYLE_SUFFIX = (
     " Photorealistic still frame from a live television news broadcast, "
     "professional broadcast camera, soft studio lighting, 16:9 widescreen framing, "
-    "slight video look, sharp focus, highly detailed, no readable text, no logos, no watermark."
+    "sharp focus, highly detailed, no text, no letters, no numbers, no logos, no watermark."
 )
 
 
@@ -343,12 +355,44 @@ async def fetch_and_generate_tldr(channel: discord.TextChannel, hours: int) -> s
 
 
 # ------------------------------------------------------------------
-# Εικόνα (στυλ δελτίου ειδήσεων)
+# Εικόνα: φωτορεαλιστικό στούντιο ειδήσεων + γραφικά με τίτλους
 # ------------------------------------------------------------------
-async def build_image_prompt(summary: str) -> str:
-    text = await generate_summary(IMAGE_PROMPT_SYSTEM, [summary])
-    text = " ".join(text.replace('"', "").split())
-    return text[:900]
+@dataclass
+class NewsPlan:
+    image_prompt: str
+    headline: str
+    subhead: str
+    ticker: list[str]
+
+
+def parse_news_plan(raw: str) -> NewsPlan:
+    start, end = raw.find("{"), raw.rfind("}")
+    if start == -1 or end <= start:
+        raise ValueError("Δεν βρέθηκε JSON")
+    data = json.loads(raw[start:end + 1])
+
+    def clean(value, limit):
+        return " ".join(str(value or "").split())[:limit]
+
+    image_prompt = clean(data.get("image_prompt"), 900).replace('"', "")
+    headline = clean(data.get("headline"), 100)
+    subhead = clean(data.get("subhead"), 140)
+    ticker = [clean(t, 60) for t in (data.get("ticker") or []) if str(t).strip()][:4]
+    if not image_prompt or not headline:
+        raise ValueError("Λείπουν πεδία (image_prompt/headline)")
+    return NewsPlan(image_prompt, headline, subhead, ticker)
+
+
+async def build_news_plan(summary: str) -> NewsPlan:
+    last_err: Exception | None = None
+    for _ in range(2):  # μία επανάληψη αν το μοντέλο δεν επιστρέψει έγκυρο JSON
+        raw = await generate_summary(NEWS_PLAN_SYSTEM, [summary])
+        try:
+            return parse_news_plan(raw)
+        except Exception as e:
+            last_err = e
+            print(f"[News plan parse error] {e} | {raw[:200]!r}")
+    raise ValueError(f"Αποτυχία σχεδίου δελτίου: {last_err}")
 
 
 async def _cf_image(prompt: str) -> bytes:
@@ -388,13 +432,15 @@ async def _pollinations_image(prompt: str) -> bytes:
 
 
 async def generate_image(summary: str) -> bytes | None:
-    """Επιστρέφει bytes εικόνας ή None. Δεν πετάει ποτέ exception."""
+    """Επιστρέφει bytes εικόνας δελτίου (με τίτλους) ή None. Δεν πετάει ποτέ exception."""
     if not IMAGE_ENABLED:
         return None
 
     async def _run() -> bytes | None:
-        prompt = await build_image_prompt(summary) + IMAGE_STYLE_SUFFIX
+        plan = await build_news_plan(summary)
+        prompt = plan.image_prompt + IMAGE_STYLE_SUFFIX
         print(f"[Image prompt] {prompt}")
+        print(f"[News] {plan.headline} | {plan.subhead} | {plan.ticker}")
 
         backends = []
         if CF_ACCOUNT_ID and CF_API_TOKEN:
@@ -403,9 +449,18 @@ async def generate_image(summary: str) -> bytes | None:
 
         for name, fn in backends:
             try:
-                return await asyncio.wait_for(fn(prompt), timeout=IMAGE_TIMEOUT)
+                raw = await asyncio.wait_for(fn(prompt), timeout=IMAGE_TIMEOUT)
             except Exception as e:
                 print(f"[Image {name} failed] {str(e)[:200]}")
+                continue
+            try:
+                now_str = datetime.now(ATHENS_TZ).strftime("%H:%M")
+                return await asyncio.to_thread(
+                    render_news_frame, raw, plan.headline, plan.subhead, plan.ticker, now_str
+                )
+            except Exception as e:
+                print(f"[News overlay failed] {e!r}")
+                return raw  # καλύτερα η εικόνα χωρίς τίτλους παρά τίποτα
         return None
 
     try:
