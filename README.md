@@ -1,4 +1,6 @@
 Gred's TLDR
+
+
 A Discord bot that generates TL;DR summaries of conversations/messages, with support for creating news-broadcast-style graphics.
 
 ✨ Features
@@ -23,6 +25,7 @@ Python 3.9+ (προσάρμοσε ανάλογα)
 A Discord bot token
 
 Dependencies from requirements.txt
+
 
 Ένα Discord bot που δημιουργεί περιλήψεις TL;DR από μηνύματα/συνομιλίες, με υποστήριξη για γραφικά τύπου «news broadcast».
 
