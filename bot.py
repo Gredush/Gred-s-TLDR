@@ -86,7 +86,7 @@ AUTO_TLDR_TIMES = [
     for i in range(24 // AUTO_TLDR_HOURS)
 ]
 
-# Κανάλι με "πικάντικο" ύφος
+# Κανάλι με "πικάντικο" ύφος:
 SPICY_CHANNEL_ID = 785612058360021033
 
 
