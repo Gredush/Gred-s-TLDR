@@ -28,6 +28,7 @@ Dependencies from requirements.txt
 
 
 License
+
 This project is proprietary. All rights reserved. No part of this code may be used, copied, modified, or distributed without explicit permission from the author.
 
 
@@ -58,4 +59,5 @@ Token για το Discord bot
 
 
 Άδεια
+
 Αυτό το έργο είναι ιδιόκτητο. Με την επιφύλαξη παντός δικαιώματος. Κανένα μέρος αυτού του κώδικα δεν επιτρέπεται να χρησιμοποιηθεί, να αντιγραφεί, να τροποποιηθεί ή να διανεμηθεί χωρίς ρητή άδεια από τον συγγραφέα.
