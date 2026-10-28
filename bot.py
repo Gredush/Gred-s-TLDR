@@ -58,10 +58,14 @@ CEREBRAS_MODEL = os.getenv("CEREBRAS_MODEL", "gpt-oss-120b")  # έλεγξε τ�
 GEMINI_MAX_CHARS = 60_000
 CEREBRAS_MAX_CHARS = 30_000
 GROQ_MAX_CHARS = {          # με βάση τα free TPM (12k / 6k) + system prompt + output
-    "llama-3.3-70b-versatile": 14_000,
-    "llama-3.1-8b-instant": 6_500,
+    "llama-3.3-70b-versatile": 12_000,
+    "llama-3.1-8b-instant": 4_500,
 }
-GROQ_DEFAULT_MAX_CHARS = 6_500
+GROQ_DEFAULT_MAX_CHARS = 4_500
+GROQ_MAX_OUT = {            # tokens εξόδου (οι μεγαλύτερες συνόψεις χρειάζονται χώρο)
+    "llama-3.3-70b-versatile": 1800,
+    "llama-3.1-8b-instant": 1200,
+}
 
 PER_CALL_TIMEOUT = 40   # δευτερόλεπτα ανά κλήση
 TOTAL_TIMEOUT = 110     # συνολικό όριο για όλη την αλυσίδα
@@ -112,7 +116,7 @@ activity_ready: set[int] = set()            # κανάλια με φορτωμέ
 activity_bootstrapping: set[int] = set()
 activity_last_check: dict[int, float] = {}
 bootstrap_sem = asyncio.Semaphore(2)        # όχι πολλά history fetch μαζί
-SUMMARY_PREFIXES = ("**TL;DR", "🤖 **Αυτόματο TL;DR", "⚡ **Catch-up TL;DR")
+SUMMARY_PREFIXES = ("**TL;DR", "🤖 **Αυτόματο TL;DR", "⚡ **Catch-up TL;DR", "**(συνέχεια)**")
 background_tasks: set = set()
 
 ATHENS_TZ = ZoneInfo("Europe/Athens")
@@ -124,53 +128,106 @@ AUTO_TLDR_TIMES = [
 
 # Κανάλι με "πικάντικο" ύφος
 SPICY_CHANNEL_ID = 785612058360021033
+# Ένταση "κατινιάς": 1 = διακριτική, 2 = εμφανής (default), 3 = έντονη
+SPICY_LEVEL = max(1, min(3, int(os.getenv("SPICY_LEVEL", "2"))))
+# Μνήμη διαφωνιών/εκκρεμοτήτων από τις προηγούμενες σύνοψεις του ΙΔΙΟΥ καναλιού
+SPICY_MEMORY_ENABLED = os.getenv("SPICY_MEMORY_ENABLED", "true").lower() == "true"
 
 
 # ------------------------------------------------------------------
 # Prompts
 # ------------------------------------------------------------------
 BASE_PROMPT = """\
-Είσαι ένας ακριβής και αντικειμενικός αναλυτής συνομιλιών Discord σε community chat.
-Η αποστολή σου είναι να διαβάζεις ιστορικά συνομιλιών (Ελληνικά, Greeklish, Αγγλικά, slang) και να παράγεις μια καθαρή, εύκολα κατανοητή σύνοψη (TL;DR) αποκλειστικά στα Ελληνικά, ώστε κάποιος που μόλις μπήκε να καταλάβει γρήγορα τι συζητήθηκε.
+Είσαι ένας ακριβής αναλυτής συνομιλιών Discord σε community chat.
+Διαβάζεις ιστορικά συνομιλιών (Ελληνικά, Greeklish, Αγγλικά, slang) και γράφεις μια πλούσια αλλά καθαρή σύνοψη (TL;DR) αποκλειστικά στα Ελληνικά, ώστε κάποιος που μόλις μπήκε να καταλάβει τι ακριβώς συζητήθηκε, ποιος υποστήριξε τι και τι έμεινε ανοιχτό.
 
 ### ΟΔΗΓΙΕΣ ΣΚΕΨΗΣ (ΜΗΝ ΤΙΣ ΕΜΦΑΝΙΖΕΙΣ)
-Πριν γράψεις την τελική σύνοψη, σκέψου εσωτερικά:
 1. Εντόπισε τα βασικά θέματα που συζητήθηκαν.
-2. Για κάθε θέμα σημείωσε σύντομα πώς ξεκίνησε και πώς εξελίχθηκε.
-3. Δες αν υπήρξαν αξιοσημείωτες τοποθετήσεις, αστεία ή έντονες συζητήσεις.
-4. Αγνόησε πλήρως: εικόνες, GIFs, emojis, bot messages, reactions και links που δεν συνεισφέρουν στη συζήτηση.
-5. Μην προσθέτεις τίποτα που δεν υπάρχει ρητά στα μηνύματα. Αν κάτι δεν είναι σαφές, μην το αναφέρεις.
+2. Για κάθε θέμα: πώς ξεκίνησε, ποιοι συμμετείχαν, ποιες απόψεις ή επιχειρήματα ακούστηκαν, πώς εξελίχθηκε και πώς κατέληξε (ή αν έμεινε ανοιχτό).
+3. Εντόπισε διαφωνίες (ποιος υποστήριξε τι) και ερωτήσεις που έμειναν αναπάντητες.
+4. Εντόπισε αξιοσημείωτες στιγμές: αστεία που κράτησαν, έντονες ανταλλαγές, απρόσμενες εξελίξεις.
+5. Αγνόησε εικόνες, GIFs, emojis, bot messages, reactions και links χωρίς περιεχόμενο.
+6. Μην προσθέτεις τίποτα που δεν υπάρχει ρητά στα μηνύματα. Αν κάτι δεν είναι σαφές, μην το αναφέρεις.
 
 ### ΚΑΝΟΝΕΣ ΕΞΟΔΟΥ
 - Γράψε μόνο στα Ελληνικά, με σωστή ορθογραφία και φυσική ροή.
-- Τόνος: ουδέτερος, καθαρός και εύκολα αναγνώσιμος (σαν να εξηγείς σε κάποιον τι έγινε όσο έλειπε).
-- Μην κρίνεις, μην σχολιάζεις χαρακτήρες και μην βγάζεις συμπεράσματα.
+- Όταν αποδίδεις άποψη ή ενέργεια σε κάποιον, χρησιμοποίησε το όνομά του όπως εμφανίζεται στο log. Μην αποδίδεις ποτέ κάτι που δεν είπε.
+- Να είσαι συγκεκριμένος και πλούσιος: λεπτομέρειες, ονόματα, αριθμοί, ό,τι ειπώθηκε ουσιαστικά. Όχι γενικόλογες φράσεις.
+- Τόνος: καθαρός και εύκολα αναγνώσιμος. Μην κρίνεις ποιος έχει δίκιο.
 - Μην εφευρίσκεις ούτε συνδέεις άσχετα θέματα μεταξύ τους.
 
 ### ΔΟΜΗ ΕΞΟΔΟΥ (Χρησιμοποίησε αυτή)
 📌 **Τι συζητήθηκε**
-- **[Θέμα 1]:** Σύντομη περιγραφή του τι ειπώθηκε και πώς κύλησε η κουβέντα.
+- **[Θέμα 1]:** περιγραφή (2-4 προτάσεις όταν η συζήτηση το δικαιολογεί).
 - **[Θέμα 2]:** ...
-- **[Θέμα 3]:** ...
-(Αν υπήρχαν πολλά μικρά/περαστικά θέματα, ομαδοποίησέ τα σε μία γραμμή τύπου «Διάφορα μικρά θέματα: ...»)
+(Μικρά περαστικά θέματα ομαδοποίησέ τα σε μία γραμμή «Διάφορα μικρά θέματα: ...»)
+
+🗣️ **Στάσεις & διαφωνίες**
+- (Μόνο αν υπήρξαν διαφορετικές απόψεις: ποιος υποστήριξε τι και αν το θέμα έκλεισε. Αλλιώς παράλειψε την ενότητα.)
+
+❓ **Εκκρεμότητες**
+- (Μόνο αν έμειναν αναπάντητες ερωτήσεις ή ανοιχτά θέματα. Αλλιώς παράλειψε την ενότητα.)
 
 💡 **Αξιοσημείωτα**
-- (Μόνο αν υπήρξε κάτι ιδιαίτερο: έντονη συζήτηση, αστείο που κράτησε, σημαντική τοποθέτηση κλπ. Αν δεν υπάρχει τίποτα ξεχωριστό → παράλειψε εντελώς αυτή την ενότητα)
+- (Μόνο αν υπήρξε κάτι ιδιαίτερο. Αλλιώς παράλειψε την ενότητα.)
 
-### ΠΕΡΙΟΡΙΣΜΟΣ ΜΗΚΟΥΣ
-Κράτα τη σύνοψη γύρω στις 180–200 λέξεις και ΠΟΤΕ πάνω από 1700 χαρακτήρες συνολικά (πρέπει να χωράει σε ένα μήνυμα Discord).
+### ΜΗΚΟΣ
+{LENGTH}
 """
 
-SPICY_ADDON = """
-### ΕΙΔΙΚΗ ΠΡΟΣΘΗΚΗ ΥΦΟΥΣ (ΠΟΛΥ ΠΟΛΥ ΔΙΑΚΡΙΤΙΚΗ)
-Σε αυτό το κανάλι ο τόνος είναι ελάχιστα λιγότερο ουδέτερος: ένα ξερό, σχεδόν αδιόρατο «ανασηκωμένο φρύδι». Η δομή και ο όγκος της σύνοψης μένουν ΑΚΡΙΒΩΣ ίδια. Η αλλαγή είναι μικρή και εύκολο να περάσει απαρατήρητη.
-- Πρόσθεσε το πολύ 1–2 υπαινιγμούς συνολικά, μία πρόταση ο καθένας, είτε μέσα σε ένα θέμα είτε στα «Αξιοσημείωτα».
-- Κάθε υπαινιγμός πρέπει να στηρίζεται σε κάτι που φαίνεται ΠΡΑΓΜΑΤΙΚΑ στο log: ποιος απάντησε ή δεν απάντησε σε μια ερώτηση, ποιος εξαφανίστηκε ξαφνικά, ένα θέμα που κόπηκε απότομα, μια σύμπτωση στη χρονική σειρά, ένα σχόλιο που έμεινε χωρίς συνέχεια.
-- Διατύπωσέ τον ως παρατήρηση ή ανοιχτό ερώτημα, ποτέ ως βεβαιότητα. Π.χ. «Το ερώτημα του Χ έμεινε τελικά αναπάντητο… ενδιαφέρον.» ή «Δεν είναι σαφές τι ακριβώς έγινε με το θέμα Υ, αλλά η κουβέντα άλλαξε απότομα.»
-- Μην εξηγείς τον υπαινιγμό και μην αναφέρεις ότι σου ζητήθηκε ύφος ή ίντριγκα.
-- ΑΠΑΓΟΡΕΥΕΤΑΙ: υπαινιγμοί για σεξουαλικότητα, υγεία, οικογένεια, οικονομικά, θρησκεία, πολιτικές πεποιθήσεις ή προσωπικές σχέσεις. Επίσης απαγορεύονται προσβολές, χλευασμός και αναφορές σε άτομα που δεν μιλούν στο log.
-- Αν δεν υπάρχει κάτι πρόσφορο, μη βάλεις τίποτα. Η σύνοψη μένει κανονική.
+
+def length_rule(total_chars: int) -> str:
+    """Η σύνοψη μεγαλώνει ανάλογα με τον όγκο της συζήτησης."""
+    if total_chars < 2500:
+        words, cap = "150-200", 1500
+    elif total_chars < 7000:
+        words, cap = "250-330", 2400
+    else:
+        words, cap = "380-450", 3400
+    return (f"Στόχος: {words} λέξεις. Αν η συζήτηση ήταν πολύ μικρή ή φτωχή, μην παραγεμίζεις. "
+            f"ΠΟΤΕ πάνω από {cap} χαρακτήρες συνολικά.")
+
+
+SPICY_INTENSITY = {
+    1: "Ένταση 1/3 (διακριτική): 1-2 πειράγματα συνολικά, μία πρόταση το καθένα.",
+    2: ("Ένταση 2/3 (εμφανώς κατινιάρικη): 3-5 πειράγματα συνολικά, διάσπαρτα σε διάφορες ενότητες, "
+        "και ένα σύντομο «κουτσομπολίστικο» κλείσιμο στο τέλος της σύνοψης (μία πρόταση)."),
+    3: ("Ένταση 3/3 (έντονη): 5-7 πειράγματα, κάθε ενότητα μπορεί να κλείνει με σχόλιο, και η σύνοψη "
+        "κλείνει με μικρό cliffhanger. Ακόμα και εδώ ισχύουν όλα τα όρια."),
+}
+
+SPICY_BASE = """
+### ΥΦΟΣ ΚΑΝΑΛΙΟΥ: «ΚΑΤΙΝΙΑ» (παιχνιδιάρικο κουτσομπολιό)
+Σε αυτό το κανάλι γράφεις σαν στήλη κουτσομπολιού μιας παρέας φίλων: ξερό χιούμορ, ανασηκωμένα φρύδια, πειράγματα με νόημα. Η δομή της σύνοψης (οι ενότητες) μένει ίδια· το ύφος αλλάζει στον τρόπο που περιγράφεις τα πράγματα και στο κλείσιμο των ενοτήτων. Στόχος: να γελάσουν, όχι να τσακωθούν.
+
+{INTENSITY}
+
+Τεχνικές (χρησιμοποίησε ό,τι ταιριάζει):
+- Ονόμασε ονόματα (όπως στο log) για πράγματα που ΠΡΑΓΜΑΤΙΚΑ έγιναν: ποιος άλλαξε θέμα όταν τον ρώτησαν, ποιος εμφανίστηκε μόνο για να διαφωνήσει, ποιος «ξαφνικά» σώπασε, ποιος έχει άποψη για όλα.
+- Δραματική υποτίμηση και ρητορικές ερωτήσεις: «Τυχαίο; Μάλλον.», «Ας μη σχολιάσουμε.», «Κάποιοι ξέρουν γιατί.»
+- Αντιφάσεις: αν κάποιος είπε το ένα πριν και το άλλο τώρα, επισήμανέ το ελαφρά.
+- Μικρά cliffhangers: «Η υπόθεση συνεχίζεται.», «Το θέμα δεν έκλεισε και όλοι το ξέρουν.»
+- Συνέχεια: αν υπάρχουν προηγούμενες σύνοψεις και κάποια διαφωνία ή ερώτηση έμεινε ανοιχτή και ΕΠΑΝΗΛΘΕ ή παραμένει άλυτη, ανάφερέ την με ένα χαριτωμένο callback.
+
+ΑΠΑΡΑΒΑΤΑ ΟΡΙΑ:
+- Μόνο όσα φαίνονται στα μηνύματα. Μην επινοείς γεγονότα, κίνητρα ή αποσπάσματα. Παρατήρηση ή ερώτηση, ποτέ ετυμηγορία.
+- Πείραζε καταστάσεις και συμπεριφορές μέσα στη συζήτηση, όχι τους ανθρώπους ως προσωπικότητες. Όχι προσβολές, ούτε για εμφάνιση, νοημοσύνη ή καταγωγή.
+- Ποτέ υπαινιγμοί για σεξουαλικότητα, υγεία, οικογένεια, οικονομικά, θρησκεία, πολιτικές πεποιθήσεις, προσωπικές σχέσεις ή προσωπικά στοιχεία.
+- ΟΧΙ καβγάς: μην παίρνεις το μέρος κανενός, μην προτρέπεις κανέναν να αντιμετωπίσει ή να «απαντήσει» σε κάποιον, μην κλιμακώνεις. Οι διαφωνίες αναφέρονται ως αστείες «εκκρεμότητες», όχι ως μάχη.
+- Μοίρασε τα πειράγματα, μην στοχεύεις συνέχεια το ίδιο άτομο.
+- Αν στα μηνύματα υπάρχει πραγματικός θυμός, προσωπικές επιθέσεις, παρενόχληση ή κάποιος φαίνεται πληγωμένος ή ευάλωτος, ΜΗΝ βάλεις πείραγμα σε εκείνο το κομμάτι: γράψε το ουδέτερα και ήρεμα.
+- Μην αναφέρεις ποτέ ότι σου ζητήθηκε συγκεκριμένο ύφος.
 """
+
+MEMORY_ADDON = """
+### ΜΝΗΜΗ ΚΑΝΑΛΙΟΥ
+Πριν από τα «ΝΕΑ ΜΗΝΥΜΑΤΑ» θα βρεις προηγούμενες σύνοψεις του ίδιου καναλιού. ΜΗΝ τις ξανασυνοψίσεις και μην τις θεωρείς γεγονότα (τα πειράγματά τους ήταν αστεία). Χρησιμοποίησέ τες μόνο για συνέχεια: αν μια διαφωνία, ερώτηση ή «υπόθεση» που είχε μείνει ανοιχτή επανήλθε ή παραμένει άλυτη, ανάφερέ την με ένα ελαφρύ callback (π.χ. «η υπόθεση Χ παραμένει ανοιχτή»). Αν είχε λυθεί ή δεν σχετίζεται, αγνόησέ την.
+"""
+
+
+def spicy_addon(level: int) -> str:
+    return SPICY_BASE.replace("{INTENSITY}", SPICY_INTENSITY.get(level, SPICY_INTENSITY[2]))
+
 
 NEWS_PLAN_SYSTEM = """\
 You create a satirical "breaking news" TV frame from a Greek-language summary of a Discord chat. Return ONLY a JSON object (no markdown fences, no commentary) with exactly these keys:
@@ -208,21 +265,42 @@ IMAGE_STYLE_SUFFIX = (
 # ------------------------------------------------------------------
 # Βοηθητικά
 # ------------------------------------------------------------------
-def fit_to_discord_limit(header: str, text: str, max_limit: int = 1980) -> str:
-    full_text = header + text
-    if len(full_text) <= max_limit:
-        return full_text
+def split_for_discord(header: str, text: str, limit: int = 1980, max_parts: int = 2) -> list[str]:
+    """Σπάει τη σύνοψη σε έως max_parts μηνύματα (σε αλλαγή παραγράφου όπου γίνεται)."""
+    text = text.strip()
+    if len(header) + len(text) <= limit:
+        return [header + text]
 
-    cutoff_note = "\n\n*(Η σύνοψη κόπηκε λόγω ορίου χαρακτήρων)*"
-    allowed = max_limit - len(header) - len(cutoff_note)
-    trimmed = text[:allowed]
-    # κόψε σε αλλαγή γραμμής αν υπάρχει αρκετά κοντά, αλλιώς σε κενό
-    for sep in ("\n", " "):
-        idx = trimmed.rfind(sep)
-        if idx > allowed * 0.6:
-            trimmed = trimmed[:idx]
+    cont_header = "**(συνέχεια)**\n\n"
+    parts: list[str] = []
+    remaining, head = text, header
+    while remaining and len(parts) < max_parts:
+        room = limit - len(head)
+        if len(remaining) <= room:
+            parts.append(head + remaining)
+            remaining = ""
             break
-    return header + trimmed + cutoff_note
+        cut = remaining.rfind("\n\n", 0, room)
+        if cut < room * 0.4:
+            cut = remaining.rfind("\n", 0, room)
+        if cut < room * 0.4:
+            cut = remaining.rfind(" ", 0, room)
+        if cut <= 0:
+            cut = room
+        parts.append(head + remaining[:cut].rstrip())
+        remaining = remaining[cut:].lstrip()
+        head = cont_header
+
+    if remaining and parts:  # δεν χώρεσε ούτε στα max_parts μηνύματα
+        note = "\n\n*(Η σύνοψη κόπηκε λόγω ορίου χαρακτήρων)*"
+        last = parts[-1][: limit - len(note)]
+        for sep in ("\n", " "):
+            idx = last.rfind(sep)
+            if idx > len(last) * 0.8:
+                last = last[:idx]
+                break
+        parts[-1] = last.rstrip() + note
+    return parts
 
 
 def build_log(lines: list[str], max_chars: int) -> str:
@@ -255,7 +333,7 @@ async def _call_gemini(model: str, system_prompt: str, chat_log: str) -> str:
         config=types.GenerateContentConfig(
             system_instruction=system_prompt,
             temperature=0.4,
-            max_output_tokens=4096,  # περιθώριο και για εσωτερικό "thinking"
+            max_output_tokens=6144,  # περιθώριο και για εσωτερικό "thinking"
         ),
     )
     return resp.text or ""
@@ -269,7 +347,7 @@ async def _call_groq(model: str, system_prompt: str, chat_log: str) -> str:
             {"role": "user", "content": f"Ιστορικό Συνομιλίας:\n{chat_log}"},
         ],
         temperature=0.3,
-        max_tokens=900,  # κρατά χαμηλά το TPM
+        max_tokens=GROQ_MAX_OUT.get(model, 1200),
     )
     return resp.choices[0].message.content or ""
 
@@ -284,7 +362,7 @@ async def _call_cerebras(model: str, system_prompt: str, chat_log: str) -> str:
             {"role": "user", "content": f"Ιστορικό Συνομιλίας:\n{chat_log}"},
         ],
         "temperature": 0.3,
-        "max_tokens": 1500,
+        "max_tokens": 2500,
     }
     async with aiohttp.ClientSession() as session:
         async with session.post(
@@ -333,9 +411,15 @@ class SummaryError(Exception):
     pass
 
 
-async def generate_summary(system_prompt: str, lines: list[str]) -> str:
+async def generate_summary(system_prompt: str, lines: list[str], context: str = "") -> str:
     deadline = time.monotonic() + TOTAL_TIMEOUT
     failures = []
+    context_block = ""
+    if context:
+        context_block = (
+            "--- ΠΡΟΗΓΟΥΜΕΝΕΣ ΣΥΝΟΨΕΙΣ ΤΟΥ ΚΑΝΑΛΙΟΥ (μόνο για συνέχεια) ---\n"
+            f"{context}\n\n--- ΝΕΑ ΜΗΝΥΜΑΤΑ (αυτά να συνοψίσεις) ---\n"
+        )
 
     for p in PROVIDERS:
         remaining = deadline - time.monotonic()
@@ -345,7 +429,7 @@ async def generate_summary(system_prompt: str, lines: list[str]) -> str:
             continue
         try:
             text = await asyncio.wait_for(
-                p.call(system_prompt, build_log(lines, p.max_chars)),
+                p.call(system_prompt, context_block + build_log(lines, max(p.max_chars - len(context_block), 2000))),
                 timeout=min(PER_CALL_TIMEOUT, remaining),
             )
             if text and text.strip():
@@ -394,11 +478,38 @@ async def fetch_and_generate_tldr(
 
     lines.reverse()  # παλιό -> νέο
 
-    system_prompt = BASE_PROMPT
+    total_chars = sum(len(l) + 1 for l in lines)
+    system_prompt = BASE_PROMPT.replace("{LENGTH}", length_rule(total_chars))
+    context = ""
     if channel.id == SPICY_CHANNEL_ID:
-        system_prompt += SPICY_ADDON
+        system_prompt += spicy_addon(SPICY_LEVEL)
+        if SPICY_MEMORY_ENABLED:
+            context = await fetch_previous_summaries(channel)
+            if context:
+                system_prompt += MEMORY_ADDON
 
-    return await generate_summary(system_prompt, lines)
+    return await generate_summary(system_prompt, lines, context=context)
+
+
+async def fetch_previous_summaries(
+    channel: discord.TextChannel, max_msgs: int = 200, keep: int = 6, max_chars: int = 4500
+) -> str:
+    """Οι τελευταίες σύνοψες του bot ΣΤΟ ΙΔΙΟ κανάλι (χρησιμεύουν ως μνήμη ανοιχτών θεμάτων).
+    Δεν χρειάζεται αποθήκευση: το ιστορικό του καναλιού είναι η μνήμη."""
+    found: list[str] = []
+    try:
+        async for m in channel.history(limit=max_msgs):
+            if bot.user is not None and m.author.id == bot.user.id and m.content.startswith(SUMMARY_PREFIXES):
+                found.append(m.content)
+                if len(found) >= keep:
+                    break
+    except Exception as e:
+        print(f"[Memory fetch Error] {e!r}")
+        return ""
+    if not found:
+        return ""
+    found.reverse()  # παλιό -> νέο
+    return "\n\n".join(found)[-max_chars:]
 
 
 # ------------------------------------------------------------------
@@ -521,14 +632,32 @@ async def make_tldr_payload(
     channel: discord.TextChannel, hours: int | None, header: str,
     after: datetime | None = None, with_image: bool = True,
 ):
-    """Επιστρέφει (κείμενο, discord.File | None) ή None αν δεν υπάρχουν μηνύματα."""
+    """Επιστρέφει (λίστα μηνυμάτων, discord.File | None) ή None αν δεν υπάρχουν μηνύματα."""
     summary = await fetch_and_generate_tldr(channel, hours=hours, after=after)
     if not summary:
         return None
-    text = fit_to_discord_limit(header, summary)
+    chunks = split_for_discord(header, summary)
     image = await generate_image(summary) if with_image else None
     file = discord.File(io.BytesIO(image), filename="tldr.jpg") if image else None
-    return text, file
+    return chunks, file
+
+
+async def deliver(send, chunks: list[str], file: discord.File | None = None):
+    """Στέλνει τα chunks (η εικόνα πάει με το πρώτο). Αν αποτύχει η εικόνα, ξαναδοκιμάζει χωρίς αυτήν."""
+    try:
+        if file:
+            await send(chunks[0], file=file)
+        else:
+            await send(chunks[0])
+    except discord.Forbidden:
+        raise
+    except Exception as e:
+        print(f"[Deliver first chunk failed] {e}")
+        if not file:
+            raise
+        await send(chunks[0])  # χωρίς εικόνα
+    for c in chunks[1:]:
+        await send(c)
 
 
 # ------------------------------------------------------------------
@@ -571,18 +700,8 @@ async def run_catchup(channel: discord.TextChannel):
             channel, None, header, after=since, with_image=CATCHUP_WITH_IMAGE
         )
         if payload:
-            text, file = payload
-            try:
-                if file:
-                    await channel.send(text, file=file)
-                else:
-                    await channel.send(text)
-            except discord.Forbidden:
-                raise
-            except Exception as e:
-                print(f"[Catch-up send with image failed] {e}")
-                if file:
-                    await channel.send(text)
+            chunks, file = payload
+            await deliver(channel.send, chunks, file)
         success = True
         catchup_last_run[cid] = time.monotonic()
     except discord.Forbidden:
@@ -729,17 +848,9 @@ async def auto_tldr_task():
             header = f"🤖 **Αυτόματο TL;DR Τελευταίων {AUTO_TLDR_HOURS} Ωρών** 📝\n\n"
             payload = await make_tldr_payload(channel, AUTO_TLDR_HOURS, header)
             if payload:
-                text, file = payload
+                chunks, file = payload
                 reset_catchup(channel_id)
-                try:
-                    if file:
-                        await channel.send(text, file=file)
-                    else:
-                        await channel.send(text)
-                except Exception as e:
-                    print(f"[Auto TLDR send with image failed] {e}")
-                    if file:
-                        await channel.send(text)  # ξανά χωρίς εικόνα
+                await deliver(channel.send, chunks, file)
     except Exception as e:
         print(f"[Auto TLDR Error] {e}")
 
@@ -812,8 +923,11 @@ async def tldr(interaction: discord.Interaction, hours: int):
 
         last_used[channel_id] = time.time()
         reset_catchup(channel_id)
-        text, file = payload
-        await safe_followup(interaction, text, file)
+        chunks, file = payload
+        try:
+            await deliver(interaction.followup.send, chunks, file)
+        except Exception as e:
+            print(f"[Followup deliver Error] {e!r}")
 
     except SummaryError as e:
         await safe_followup(interaction, f"⚠️ {e}")
